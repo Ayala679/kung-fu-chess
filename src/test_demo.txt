@@ -1,0 +1,13 @@
+Board:
+wK bK . .
+. . . .
+. . . .
+. . . .
+
+Commands:
+print board
+click 0 0
+print board
+wait 500
+print board
+

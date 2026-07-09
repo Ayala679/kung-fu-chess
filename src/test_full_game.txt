@@ -1,0 +1,19 @@
+Board:
+wK bK . .
+. . . .
+. . . .
+wP . . bP
+
+Commands:
+print board
+click 0 1
+print board
+click 1 1
+print board
+wait 600
+print board
+jump 3 0
+print board
+wait 100
+print board
+

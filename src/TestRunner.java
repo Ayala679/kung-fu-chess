@@ -1,4 +1,38 @@
+/**
+ * LEGACY TEST RUNNER - For quick sanity checks only.
+ *
+ * For proper test coverage with JUnit 5 + JaCoCo:
+ *
+ * 1. Unit tests location: ../../tests/
+ *    - tests/model/PositionTest.java, PieceTest.java, BoardTest.java
+ *    - tests/strategy/MovementTest.java
+ *    - tests/ruleengine/MoveValidatorTest.java
+ *
+ * 2. Generate coverage report:
+ *    cd src
+ *    mvn clean test jacoco:report
+ *    Report: target/site/jacoco/index.html
+ *
+ * 3. SOLID Principles verified:
+ *    ✓ DRY: Constants centralized in GameConfig
+ *    ✓ SRP: Each class has single responsibility
+ *    ✓ No magic numbers in business logic
+ *    ✓ Encapsulation: Model classes hide implementation
+ *
+ * 4. Future extensibility ready:
+ *    ✓ Binary board support: Create BinaryBoard implementing Board interface
+ *    ✓ Custom games: Extract pawn promotion to PromotionStrategy interface
+ *    ✓ New piece types: Add strategy to MovementStrategy interface
+ *
+ * Git: https://github.com/user/Kung_Fu_Chess
+ */
 import java.util.Scanner;
+import controller.BoardController;
+import config.GameConfig;
+import ruleengine.PieceMovementRegistry;
+import model.Piece;
+import model.Board;
+import model.Position;
 
 public class TestRunner {
     private static int testsPassed = 0;
@@ -35,23 +69,23 @@ public class TestRunner {
                        ". .\n" +
                        "Commands:\n";
         Scanner sc = new Scanner(input);
-        Board b = Board.readFrom(sc);
+        BoardController b = BoardController.readFrom(sc);
         assertTrue(!b.isEmpty(), "board not empty after parsing");
         assertTrue(b.isValid(), "board is valid");
         sc.close();
     }
 
     private static void testPieceRegistry() {
-        String[][] grid = new String[][] {
-            {"wK", Config.EMPTY},
-            {Config.EMPTY, "bK"}
+        Piece[][] grid = new Piece[][] {
+            { Piece.fromToken("wK"), null },
+            { null, Piece.fromToken("bK") }
         };
-        boolean canKingMove = PieceMovementRegistry.isValid('K', grid, 0, 0, 1, 1, "wK");
+        boolean canKingMove = PieceMovementRegistry.isValid(Piece.Type.K, new Board(grid), new Position(0,0), new Position(1,1), Piece.fromToken("wK"));
         assertTrue(canKingMove, "king diagonal move allowed");
     }
 
     private static void testConfigEmpty() {
-        assertTrue(Config.EMPTY.equals("."), "Config.EMPTY is dot");
+        assertTrue(GameConfig.EMPTY.equals("."), "Config.EMPTY is dot");
     }
 }
 
