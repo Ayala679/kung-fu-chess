@@ -1,11 +1,15 @@
-package model;
+package tests;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-public class PieceTest {
+// ניתובי הייבוא לקוד המקור
+import model.Piece;
+
+class PieceTest {
     @Test void testFromToken() {
         Piece p = Piece.fromToken("wK");
+        assertNotNull(p);
         assertEquals(Piece.Color.WHITE, p.getColor());
         assertEquals(Piece.Type.K, p.getType());
     }
@@ -28,4 +32,3 @@ public class PieceTest {
         }
     }
 }
-

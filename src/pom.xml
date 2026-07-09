@@ -22,7 +22,7 @@
     </dependency>
   </dependencies>
   <build>
-    <testSourceDirectory>../tests</testSourceDirectory>
+    <testSourceDirectory>tests</testSourceDirectory>
     <plugins>
       <plugin>
         <groupId>org.jacoco</groupId>

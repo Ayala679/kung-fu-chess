@@ -17,5 +17,3 @@ public class GameConfig {
     public static final int PAWN_START_ROW_WHITE = 6;
     public static final int PAWN_START_ROW_BLACK = 1;
 }
-
-

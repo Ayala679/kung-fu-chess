@@ -1,9 +1,19 @@
+package gameengine;
+
 import java.util.ArrayList;
 import java.util.Scanner;
+import config.GameConfig;
+import model.GameState;
+import model.MovingPiece;
+import model.Board;
+import model.Piece;
+import model.Position;
+import ruleengine.MoveValidator;
+import view.BoardRenderer;
 
 /**
  * GameLogic: Contains all game logic.
- * Uses Board which is a pure data model.
+ * Uses model.Board which is a pure data model.
  */
 public class GameLogic {
     private Board board;
@@ -152,7 +162,6 @@ public class GameLogic {
 
         Piece destination = board.getCell(to);
         if (destination == null || destination.getColor() != piece.getColor()) {
-            // Reverted back to distance-based duration matching original code logic
             int maxDistance = Math.max(from.rowDistance(to), from.colDistance(to));
             long duration = (piece.getType() == Piece.Type.N) ? GameConfig.KNIGHT_TOTAL_DURATION : (maxDistance * GameConfig.MOVE_DURATION_PER_CELL);
             createMove(piece, from, to, duration);
@@ -169,7 +178,6 @@ public class GameLogic {
         activeMoves.add(mp);
     }
 
-    // Fixed to ensure a piece in transit cannot trigger a jump action
     private boolean isMovingAt(int row, int col) {
         Position pos = new Position(row, col);
         for (MovingPiece mp : activeMoves) {

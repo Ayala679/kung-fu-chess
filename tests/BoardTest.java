@@ -1,9 +1,14 @@
-package model;
+package tests;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-public class BoardTest {
+// ניתובי הייבוא לקוד המקור
+import model.Board;
+import model.Piece;
+import model.Position;
+
+class BoardTest {
     @Test void testBoardCreation() {
         Piece[][] grid = new Piece[8][8];
         Board b = new Board(grid);
@@ -36,4 +41,3 @@ public class BoardTest {
         assertNull(b.getCell(8, 0));
     }
 }
-

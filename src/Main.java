@@ -1,10 +1,11 @@
 import java.util.Scanner;
-
-/**
- * Main entry point - delegates everything to helper classes.
- */
-import java.util.Scanner;
 import java.util.ArrayList;
+
+import model.Board;
+import model.Piece;
+import model.GameState;
+import gameengine.GameLogic;
+import event.EventDispatcher;
 
 public class Main {
     public static void main(String[] args) {
@@ -25,7 +26,6 @@ public class Main {
             if (line.equals("Commands:")) {
                 isReadingBoard = false;
 
-                // בונים את הלוח ומאתחלים את מנוע המשחק ברגע שמגיעים ל-Commands:
                 if (!boardRows.isEmpty()) {
                     String[] firstRow = boardRows.get(0).split("\\s+");
                     int cols = firstRow.length;
@@ -51,12 +51,9 @@ public class Main {
                 continue;
             }
 
-            // ביצוע הפקודות (click, jump, wait, print board)
             if (dispatcher != null) {
                 dispatcher.dispatchFromCommand(line);
             }
         }
     }
 }
-
-

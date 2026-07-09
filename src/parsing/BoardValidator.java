@@ -4,7 +4,6 @@ package parsing;
  * Validates board structure and tokens.
  */
 public class BoardValidator {
-
     private static final String TOKEN_PATTERN = "\\.|[wb][KQRBNP]";
 
     public static boolean isValid(String[][] board) {
@@ -40,4 +39,3 @@ public class BoardValidator {
         }
     }
 }
-

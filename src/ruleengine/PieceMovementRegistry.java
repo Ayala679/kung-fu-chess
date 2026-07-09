@@ -1,3 +1,9 @@
+package ruleengine;
+
+import model.Board;
+import model.Piece;
+import model.Position;
+import strategy.MovementStrategy;
 import java.util.HashMap;
 import java.util.Map;
 

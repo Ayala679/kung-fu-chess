@@ -11,12 +11,11 @@ import java.util.ArrayList;
  *   . . . .
  */
 public class BoardParser {
-
     private static final String BOARD_MARKER = "Board:";
     private static final String COMMANDS_MARKER = "Commands:";
     private static final String WHITESPACE = "\\s+";
 
-    public String[][] readBoard(Scanner input) {
+    public static String[][] readBoard(Scanner input) {
         ArrayList<String> rows = new ArrayList<>();
         int expectedWidth = -1;
         boolean parsingBoard = false;
@@ -40,7 +39,6 @@ public class BoardParser {
             if (parsingBoard) {
                 String[] tokens = line.split(WHITESPACE);
 
-                // Check width consistency
                 if (expectedWidth == -1) {
                     expectedWidth = tokens.length;
                 } else if (tokens.length != expectedWidth) {
@@ -55,7 +53,7 @@ public class BoardParser {
         return buildMatrix(rows, expectedWidth);
     }
 
-    private String[][] buildMatrix(ArrayList<String> rows, int width) {
+    private static String[][] buildMatrix(ArrayList<String> rows, int width) {
         if (rows.isEmpty() || width <= 0) {
             return new String[0][0];
         }
@@ -67,4 +65,5 @@ public class BoardParser {
         return matrix;
     }
 }
+
 
