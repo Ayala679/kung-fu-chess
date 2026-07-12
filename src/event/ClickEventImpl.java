@@ -13,11 +13,11 @@ public class ClickEventImpl implements GameEvent {
     public int getY() { return y; }
 
     @Override
-    public void execute(gameengine.GameLogic logic) {
+    public void execute(EventEngine eventEngine) {
         CellClickEvent cellEvent = InputMapper.mapPixelToCell(
             new ClickEvent(x, y)
         );
-        logic.handleClickCell(cellEvent.getRow(), cellEvent.getCol());
+        eventEngine.handleClick(cellEvent.getRow(), cellEvent.getCol());
     }
 
     @Override

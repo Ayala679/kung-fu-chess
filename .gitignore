@@ -24,7 +24,14 @@ bin/
 /.nb-gradle/
 
 ### VS Code ###
-.vscode/
+.vscode/*
+!.vscode/settings.json
 
 ### Mac OS ###
 .DS_Store
+
+### Compiled class files ###
+*.class
+
+### Downloaded test/coverage tooling (fetched on demand by tools/run-tests.ps1) ###
+tools/*.jar

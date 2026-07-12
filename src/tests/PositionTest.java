@@ -3,7 +3,6 @@ package tests;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-// ניתובי הייבוא לקוד המקור
 import model.Position;
 
 class PositionTest {
@@ -25,9 +24,28 @@ class PositionTest {
         assertEquals(5, p1.colDistance(p2));
     }
 
+    @Test void testManhattanDistance() {
+        Position p1 = new Position(1, 1);
+        Position p2 = new Position(4, 6);
+        assertEquals(8, p1.manhattanDistance(p2));
+    }
+
     @Test void testEquality() {
         Position p1 = new Position(2, 2);
         Position p2 = new Position(2, 2);
         assertEquals(p1, p2);
+        assertEquals(p1.hashCode(), p2.hashCode());
+    }
+
+    @Test void testInequality() {
+        Position p1 = new Position(2, 2);
+        assertNotEquals(p1, new Position(2, 3));
+        assertNotEquals(p1, "not a position");
+        assertEquals(p1, p1);
+    }
+
+    @Test void testToString() {
+        Position p = new Position(2, 3);
+        assertEquals("(2,3)", p.toString());
     }
 }

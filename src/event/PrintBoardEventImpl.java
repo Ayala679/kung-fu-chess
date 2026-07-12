@@ -2,8 +2,8 @@ package event;
 
 public class PrintBoardEventImpl implements GameEvent {
     @Override
-    public void execute(gameengine.GameLogic logic) {
-        logic.printBoard();
+    public void execute(EventEngine eventEngine) {
+        eventEngine.print();
     }
 
     @Override

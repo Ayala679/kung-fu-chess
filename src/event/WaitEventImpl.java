@@ -10,8 +10,8 @@ public class WaitEventImpl implements GameEvent {
     public long getMs() { return ms; }
 
     @Override
-    public void execute(gameengine.GameLogic logic) {
-        logic.handleWait(ms);
+    public void execute(EventEngine eventEngine) {
+        eventEngine.waitFor(ms);
     }
 
     @Override

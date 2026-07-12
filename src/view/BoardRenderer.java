@@ -7,6 +7,7 @@ import model.GameState;
 import model.MovingPiece;
 import model.Piece;
 import model.Board;
+import parsing.PieceMapper;
 
 public class BoardRenderer {
     private final Board board;
@@ -46,7 +47,7 @@ public class BoardRenderer {
         for (int i = 0; i < boardHeight; i++) {
             for (int j = 0; j < boardWidth; j++) {
                 Piece p = board.getCell(i, j);
-                display[i][j] = (p == null) ? GameConfig.EMPTY : p.toToken();
+                display[i][j] = (p == null) ? GameConfig.EMPTY : PieceMapper.format(p);
             }
         }
 
@@ -57,7 +58,7 @@ public class BoardRenderer {
                 // Piece is still in transit
                 Position f = mp.getFrom();
                 Position t = mp.getTo();
-                display[f.getRow()][f.getCol()] = mp.getPiece().toToken();
+                display[f.getRow()][f.getCol()] = PieceMapper.format(mp.getPiece());
                 if (mp.isMoving()) {
                     display[t.getRow()][t.getCol()] = GameConfig.EMPTY;
                 }
@@ -65,11 +66,8 @@ public class BoardRenderer {
                 // Piece has arrived
                 Piece piece = mp.getPiece();
                 Position t = mp.getTo();
-                Piece finalPiece = piece;
-                if (piece.getType() == Piece.Type.P && (t.getRow() == 0 || t.getRow() == boardHeight - 1)) {
-                    finalPiece = Piece.fromToken((piece.getColor() == Piece.Color.WHITE ? "w" : "b") + "Q");
-                }
-                display[t.getRow()][t.getCol()] = finalPiece.toToken();
+                Piece finalPiece = piece.promotedAt(t.getRow(), boardHeight);
+                display[t.getRow()][t.getCol()] = PieceMapper.format(finalPiece);
                 if (mp.isMoving()) {
                     Position f = mp.getFrom();
                     display[f.getRow()][f.getCol()] = GameConfig.EMPTY;

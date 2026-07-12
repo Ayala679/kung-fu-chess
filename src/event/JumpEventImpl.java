@@ -13,11 +13,11 @@ public class JumpEventImpl implements GameEvent {
     public int getY() { return y; }
 
     @Override
-    public void execute(gameengine.GameLogic logic) {
+    public void execute(EventEngine eventEngine) {
         CellClickEvent cellEvent = InputMapper.mapPixelToCell(
             new ClickEvent(x, y)
         );
-        logic.handleJumpCell(cellEvent.getRow(), cellEvent.getCol());
+        eventEngine.handleJump(cellEvent.getRow(), cellEvent.getCol());
     }
 
     @Override

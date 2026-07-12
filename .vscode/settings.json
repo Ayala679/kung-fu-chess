@@ -1,0 +1,17 @@
+{
+  // Flat, non-Maven layout: sources live directly under src/, not src/main/java.
+  "java.project.sourcePaths": ["src"],
+  "java.project.outputPath": "out",
+
+  // There is no Maven/Gradle project here (see README "Build & run" and
+  // "Tests & coverage") - don't let the Java extension go looking for one.
+  "java.import.maven.enabled": false,
+  "java.import.gradle.enabled": false,
+
+  // src/tests/*.java use JUnit 5. tools/run-tests.ps1 downloads the JUnit jar
+  // into tools/ on first run - once it's there, this lets the Java extension
+  // resolve org.junit.jupiter.* and run/debug tests directly from the editor.
+  "java.project.referencedLibraries": [
+    "tools/*.jar"
+  ]
+}

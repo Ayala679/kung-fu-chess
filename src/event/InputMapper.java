@@ -1,12 +1,11 @@
 package event;
 
-public class InputMapper {
-    private static final int CELL_SIZE = 100; // pixels per cell
+import config.GameConfig;
 
+public class InputMapper {
     public static CellClickEvent mapPixelToCell(ClickEvent pixelEvent) {
-        int row = pixelEvent.getY() / CELL_SIZE;
-        int col = pixelEvent.getX() / CELL_SIZE;
+        int row = pixelEvent.getY() / GameConfig.CELL_PIXEL_SIZE;
+        int col = pixelEvent.getX() / GameConfig.CELL_PIXEL_SIZE;
         return new CellClickEvent(row, col);
     }
 }
-

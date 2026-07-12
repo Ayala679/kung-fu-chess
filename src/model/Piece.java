@@ -1,5 +1,9 @@
 package model;
 
+/**
+ * A chess piece: just its color and type. Pure domain data - it knows nothing
+ * about how pieces are encoded as text (that lives in parsing.PieceMapper).
+ */
 public final class Piece {
     public enum Color { WHITE, BLACK }
     public enum Type { K, Q, R, B, N, P }
@@ -12,35 +16,28 @@ public final class Piece {
         this.type = type;
     }
 
-    public Color getColor() { return color; }
-    public Type getType() { return type; }
-
-    public static Piece fromToken(String token) {
-        if (token == null || token.length() != 2) return null;
-        char c = token.charAt(0);
-        char t = token.charAt(1);
-        Color color = (c == 'w') ? Color.WHITE : (c == 'b') ? Color.BLACK : null;
-        Type type = null;
-        switch (t) {
-            case 'K': type = Type.K; break;
-            case 'Q': type = Type.Q; break;
-            case 'R': type = Type.R; break;
-            case 'B': type = Type.B; break;
-            case 'N': type = Type.N; break;
-            case 'P': type = Type.P; break;
-            default: type = null; break;
-        }
-        if (color == null || type == null) return null;
+    /** Build a piece from a color and type. */
+    public static Piece of(Color color, Type type) {
         return new Piece(color, type);
     }
 
-    public String toToken() {
-        char c = (color == Color.WHITE) ? 'w' : 'b';
-        return c + type.name();
+    public Color getColor() { return color; }
+    public Type getType() { return type; }
+
+    /**
+     * Returns the piece this one becomes if it arrives on the given row.
+     * A pawn reaching the far row (0 or boardHeight-1) promotes to a queen;
+     * every other piece is returned unchanged.
+     */
+    public Piece promotedAt(int toRow, int boardHeight) {
+        if (type == Type.P && (toRow == 0 || toRow == boardHeight - 1)) {
+            return new Piece(color, Type.Q);
+        }
+        return this;
     }
 
     @Override
-    public String toString() { return toToken(); }
+    public String toString() { return color + " " + type; }
 
     @Override
     public boolean equals(Object o) {
@@ -55,4 +52,3 @@ public final class Piece {
         return 31 * color.hashCode() + type.hashCode();
     }
 }
-

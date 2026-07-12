@@ -1,6 +1,8 @@
 package event;
 
+/**
+ * A command turned into an executable action against the EventEngine.
+ */
 public interface GameEvent {
-    void execute(gameengine.GameLogic logic);
+    void execute(EventEngine eventEngine);
 }
-

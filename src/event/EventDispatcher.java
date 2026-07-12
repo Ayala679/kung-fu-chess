@@ -1,16 +1,14 @@
 package event;
 
-import gameengine.GameLogic;
-
 public class EventDispatcher {
-    private GameLogic logic;
+    private final EventEngine eventEngine;
 
-    public EventDispatcher(GameLogic logic) {
-        this.logic = logic;
+    public EventDispatcher(EventEngine eventEngine) {
+        this.eventEngine = eventEngine;
     }
 
     /**
-     * Dispatches a GameEvent to be executed against the game logic.
+     * Dispatches a GameEvent to be executed against the EventEngine.
      */
     public void dispatch(GameEvent event) {
         if (event == null) {
@@ -19,7 +17,7 @@ public class EventDispatcher {
         }
 
         try {
-            event.execute(logic);
+            event.execute(eventEngine);
         } catch (Exception e) {
             System.err.println("Error executing event: " + e.getMessage());
             e.printStackTrace();
@@ -34,4 +32,3 @@ public class EventDispatcher {
         dispatch(event);
     }
 }
-

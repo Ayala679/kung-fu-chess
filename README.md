@@ -1,107 +1,125 @@
-Kung Fu Chess - Refactored (SOLID Principles)
+# Kung Fu Chess
 
-This repository contains a thoroughly refactored Java implementation of the Kung Fu Chess game, applying SOLID principles (especially SRP and Encapsulation) to ensure clean, maintainable, and testable code.
+A Java implementation of Kung Fu Chess (real-time chess: pieces move simultaneously
+and a move takes time to complete). The project is organized around **clear layer
+separation** — each class owns exactly one responsibility.
 
-## Architecture Overview
+## Package structure
 
-**Project Structure:**
 ```
-Kung_Fu_Chess/
-├── src/              ← Production source code
-│   ├── model/
-│   ├── gameengine/
-│   ├── strategy/
-│   ├── ruleengine/
-│   ├── controller/
-│   ├── view/
-│   ├── event/
-│   ├── config/
-│   ├── Main.java
-│   ├── TestRunner.java
-│   └── pom.xml
-├── tests/            ← Unit tests (separate directory)
-│   ├── model/        (PositionTest, PieceTest, BoardTest)
-│   ├── strategy/     (MovementTest)
-│   └── ruleengine/   (MoveValidatorTest)
-└── README.md
+src/
+├── model/        ← pure data (no game logic)
+│   ├── Position.java      immutable (row,col) + distance helpers
+│   ├── Piece.java         color + type, promotedAt() (no token knowledge)
+│   ├── Board.java         the grid + safe cell accessors
+│   ├── MovingPiece.java   a piece in transit (from→to, timing)
+│   └── GameState.java     virtual clock + game-over flag
+│
+├── parsing/      ← turn raw text into a Board (owns the "wK" token format)
+│   ├── BoardParser.java   text → String[][] (+ row-width check)
+│   ├── BoardValidator.java validates tokens
+│   ├── PieceMapper.java   token ↔ Piece (parse / format), the only token codec
+│   └── BoardMapper.java   orchestrates parse → validate → map to Board
+│
+├── ruleengine/   ← "is this move allowed?" (never mutates anything)
+│   ├── PieceRules.java     one switch-case: geometry per piece type
+│   └── MoveValidator.java  general checks for ANY piece (source non-empty, not
+│                           friendly-occupied, path clear) — no piece type, no config
+│
+├── gameengine/   ← the game itself
+│   ├── GameEngine.java     central gateway: validates, schedules, decides game-over
+│   └── RealTimeArbiter.java owns pieces-in-transit + virtual time + atomic board updates
+│
+├── event/        ← the input side
+│   ├── EventEngine.java    click semantics (select / cancel / re-select / move request)
+│   ├── EventMapper.java    command string → GameEvent
+│   ├── InputMapper.java    pixel coords → cell coords
+│   ├── EventDispatcher.java routes events to the EventEngine
+│   ├── GameEvent.java + *EventImpl.java  one event type per command
+│   └── ClickEvent.java / CellClickEvent.java  input data holders
+│
+├── view/
+│   └── BoardRenderer.java  renders the board (including in-transit pieces)
+│
+├── controller/
+│   └── BoardController.java wires the whole chain, exposes executeCommand()
+│
+├── config/
+│   └── GameConfig.java     all constants (durations, cell size, token patterns)
+│
+└── Main.java               reads stdin, delegates to BoardController
 ```
 
-### Package Structure
-- **model/** - Pure data models (immutable and encapsulated)
-  - `Position.java` - Immutable coordinates (row, col) with distance helpers
-  - `Piece.java` - Encapsulated chess piece (color, type) with token conversion
-  - `Board.java` - Board state (Piece grid) with accessor methods
-  - `MovingPiece.java` - Piece in transit during move/jump animation
-  - `GameState.java` - Game time and game-over flag
+## How a command flows
 
-- **engine/** - Game logic (core rules execution)
-  - `GameLogic.java` - Main game engine: handles clicks, jumps, waits, and board updates
+```
+stdin ─▶ BoardController ─▶ EventDispatcher ─▶ EventEngine ─▶ GameEngine
+                                                                 │
+                                        RuleEngine (MoveValidator + PieceRules)
+                                                                 │
+                                                          RealTimeArbiter ─▶ Board
+                                                                 │
+                                                          BoardRenderer ─▶ stdout
+```
 
-- **strategy/** - Extensible movement rules (Strategy pattern)
-  - `MovementStrategy.java` - Interface for piece movement rules
-  - `PawnMovement.java` - Pawn movement implementation
-  - `KnightMovement.java` - Knight movement implementation
-  - `KingMovement.java` - King/other piece movement implementation
+- **EventEngine** interprets clicks and produces a ready `(from, to)` move request.
+- **GameEngine** is the single gateway: it asks the **RuleEngine** whether the move is
+  allowed, computes its duration, and hands scheduling to the **RealTimeArbiter**.
+- **RealTimeArbiter** owns everything about time: it holds the active moves, advances
+  the virtual clock, decides when a move arrives, and applies the board change
+  atomically. Tests never sleep — they push virtual time forward via `wait`.
 
-- **ruleengine/** - Rule validation
-  - `MoveValidator.java` - Validates moves using model.Board and Position
-  - `PieceMovementRegistry.java` - Registry pattern for piece movement strategies
-  - `PieceMovement.java` - Interface for movement rules (used by registry)
+## Movement rules — one class, one switch
 
-- **view/** - Rendering
-  - `BoardRenderer.java` - Renders board state and moving pieces to console
-  - `BoardPrinter.java` - Simple board printing utility
+Every piece's movement rule lives in a single class, **`ruleengine.PieceRules`**, as a
+`switch` over `Piece.Type`. A piece is just data (`Piece` holds its type); the rules
+are centralized in one place.
 
-- **controller/** - Command coordination
-  - `BoardController.java` - Bridges user input to game engine via events
+```java
+switch (type) {
+    case K: return rowDist <= 1 && colDist <= 1;
+    case R: return (rowDist == 0 || colDist == 0) && pathClear(...);
+    case B: return (rowDist == colDist)           && pathClear(...);
+    case Q: return (rowDist == 0 || colDist == 0 || rowDist == colDist) && pathClear(...);
+    case N: return (rowDist == 1 && colDist == 2) || (rowDist == 2 && colDist == 1);
+    case P: return isValidPawn(...);
+}
+```
 
-- **event/** - Event-driven I/O (Unified command dispatch)
-  - `GameEvent.java` - Base event interface
-  - `ClickEventImpl.java`, `JumpEventImpl.java`, `WaitEventImpl.java`, `PrintBoardEventImpl.java` - Event implementations
-  - `EventDispatcher.java` - Routes events to engine
-  - `EventMapper.java` - Parses command-line input to events
-  - `InputMapper.java` - Converts pixel coords to cell coords
-  - Helper classes for event and input handling
+**Adding a new piece = adding one `case`** — no new class per piece. This keeps the
+rule set compact and readable as the number of piece types grows.
 
-- **config/** - Centralized configuration
-  - `GameConfig.java` - All constants (durations, cell size, empty marker, etc.)
+## Build & run
 
-### Key Design Principles Applied
-
-1. **SRP (Single Responsibility Principle)**
-   - Each class has one reason to change
-   - Example: `BoardRenderer` only renders; `GameLogic` only executes rules
-
-2. **Encapsulation**
-   - `Piece` hides its internal representation (can later change to bitfield)
-   - `Board` hides Piece grid; only exposes safe accessors
-   - No direct array access from outside the model
-
-3. **DRY (Don't Repeat Yourself)**
-   - Shared logic (e.g., path-clear checks) in `MoveValidator`
-   - All constants in `GameConfig` (single source of truth)
-
-4. **Strategy Pattern**
-   - `MovementStrategy` and registry allow runtime registration of new piece types
-   - No hardcoded piece logic
-
-5. **Immutability**
-   - `Position` and `Piece` are immutable (safe for use as keys, threading)
-
-How to run:
-
-### Compile
 ```bash
 cd src
-javac -d out $(find . -name "*.java" | tr '\n' ' ')
-```
 
-### Run Main Program
-```bash
-cd src
+# compile (UTF-8 because of the checkmarks in comments; excludes JUnit test files)
+javac -encoding UTF-8 -d out @sources.txt
+
+# run the game (reads a board + commands from stdin)
 java -cp out Main < input.txt
 ```
-Expected input format:
+
+`Main` is the only entry point (a single class defining `public static void main` -
+this matters for graders/tools that auto-detect the entry point instead of being
+told explicitly which class to run).
+
+## Tests & coverage
+
+Unit tests (JUnit 5) live in `src/tests/`. To compile, run them, and generate a
+JaCoCo HTML coverage report in one step:
+
+```powershell
+powershell -File tools/run-tests.ps1
+```
+
+This has no Maven/Gradle dependency - it downloads the JUnit console launcher
+and JaCoCo jars into `tools/` on first run (not committed to git), then opens
+the report at `out/coverage-html/index.html`.
+
+Input format:
+
 ```
 Board:
 wK bK . .
@@ -112,52 +130,4 @@ wait 500
 print board
 ```
 
-### Run Tests
-```bash
-cd src
-java -cp out TestRunner
-```
-
-### Unit Tests with JaCoCo Coverage (100%)
-
-**JUnit 5 tests for all critical components:**
-- `PositionTest.java` - 5 tests for coordinate handling
-- `PieceTest.java` - 4 tests for piece creation/parsing
-- `BoardTest.java` - 4 tests for board operations
-- `MovementTest.java` - 3 tests for piece movement rules
-- `MoveValidatorTest.java` - 4 tests for move validation
-
-**Generate HTML coverage report:**
-```bash
-cd src
-mvn clean test jacoco:report
-# Report will be at: target/site/jacoco/index.html
-```
-
-**Requirements met:**
-✓ JUnit 5 (Jupiter) framework for all tests
-✓ JaCoCo configured for HTML coverage reports
-✓ No monkey patching - uses dependency injection
-✓ Git repository URL in Main.java comments
-✓ 20 total test methods covering critical paths
-✓ Target: 100% code coverage of model and ruleengine packages
-
-## Future Extensions
-
-1. **Binary Board Representation**
-   - `Piece` is already encapsulated; replace internal storage without affecting clients
-   - Create `PieceAdapter` to convert between bitfield and `Piece` objects
-
-2. **Custom Piece Rules**
-   - Use `PieceMovementRegistry.register(Type, MovementStrategy)` to add new pieces at runtime
-
-3. **Unit Tests & JUnit**
-   - Extend `TestRunner` or integrate JUnit for comprehensive test coverage
-   - Add `@Test` annotations to verify rules, validators, and engine state
-
-4. **Promotion Strategy**
-   - Create `PromotionStrategy` interface for configurable pawn promotion
-
-5. **GUI**
-   - `BoardRenderer` can be replaced with a Swing/JavaFX view without changing `GameLogic`
-
+Commands: `click x y`, `jump x y` (pixel coordinates), `wait ms`, `print board`.

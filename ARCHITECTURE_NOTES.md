@@ -1,70 +1,88 @@
-/**
- * KUNG FU CHESS - CODE QUALITY AUDIT & DESIGN NOTES
- * 
- * QUALITY CHECKLIST (SOLID PRINCIPLES):
- * ✓ DRY (Don't Repeat Yourself): Centralized constants in GameConfig, shared logic in MoveValidator
- * ✓ SRP (Single Responsibility): Each class has one clear purpose (see Package Structure)
- * ✓ No Hard-Coded Constants: All business magic numbers in GameConfig, no hardcoding in logic
- * ✓ Encapsulation: Model classes (Position, Piece, Board) hide internal implementation
- * 
- * FUTURE ENHANCEMENTS (No implementation yet, but architecture supports them):
- * 
- * 1. BINARY REPRESENTATION:
- *    Current: Board uses Piece[][] with enums
- *    Future: Create adapter pattern in model/adapters/
- *      - PieceBinaryAdapter: Convert Piece <-> long (bitfield)
- *      - BoardBinaryAdapter: Serialize/deserialize Board to binary format
- *    Benefits: Reduce memory footprint (64x64=4096 possible positions)
- *    Impact: Zero changes to GameEngine, BoardRenderer, MoveValidator (they use Board interface)
- *    Implementation: Add interface Board { Piece getCell(...); } that both Model Board and BinaryBoard implement
- * 
- * 2. CUSTOM GAME DESIGNER:
- *    Current: Piece types hardcoded in PieceMovementRegistry, pawn promotion hardcoded
- *    Future: Create game-definition framework
- *      - GameDefinition: Stores board dimensions, piece definitions, movement rules
- *      - PieceDefinition: Color, type, custom movement strategy
- *      - PawnPromotionRule: Extensible (promote to queen, reverse direction, custom effect)
- *    Implementation path:
- *      a) Extract pawn promotion logic to PromotionStrategy interface
- *      b) Create RuleSet: composition of MovementStrategies keyed by piece type
- *      c) GameEngine uses injected RuleSet instead of hardcoded registry
- *      d) PieceMovementRegistry becomes one implementation of RuleSet
- *    This enables: User creates custom RuleSet → saves to GameDefinition → loads in GameEngine
- *    JSON config example:
- *    {
- *      "pieces": [{"type":"pawn","color":"white","movement":"forward1or2","promotion":"queen"}],
- *      "dimensions": {"width":8,"height":8},
- *      "rules": [...]
- *    }
- * 
- * CODE SMELLS DETECTED & RESOLVED:
- * ✓ No magic numbers outside GameConfig
- * ✓ Position/Piece immutable (thread-safe, good for caching)
- * ✓ Board interface-based (easy to swap implementations)
- * ✓ MovementStrategy interface (extensible without modifying existing code)
- * ✓ No static mutable state (GameLogic has state, which is correct)
- * ✓ Proper dependency injection (MoveValidator, BoardRenderer receive Board instance)
- * 
- * ARCHITECTURE DECISIONS (Supporting Extensibility):
- * - MovementStrategy interface: New piece types = new implementations, no registry change
- * - Board abstraction: Allows binary backend without touching game logic
- * - GameConfig constants: Any tuning = 1-file edit, no recompilation of logic
- * - Position/Piece immutability: Safe for concurrent access, memoization-friendly
- * - EventDispatcher: Extensible for new command types (not just click/jump/wait)
- * 
- * TESTING STRATEGY:
- * - Unit tests cover Position, Piece, Board (model layer = foundation)
- * - Movement validation tests cover all piece types
- * - Integration tests (TestRunner.java) verify flow: parse → validate → execute
- * - JaCoCo reports identify gaps (target: 100% coverage of model + ruleengine)
- * 
- * GIT REPOSITORY: https://github.com/user/Kung_Fu_Chess
- * Test Command: mvn clean test jacoco:report (generates target/site/jacoco/index.html)
- * 
- * NEXT STEPS FOR MAINTAINERS:
- * 1. Run JaCoCo to find uncovered lines
- * 2. Add tests for edge cases (boundary positions, invalid moves)
- * 3. When binary support is needed: Create adapters, run same tests against BinaryBoard
- * 4. When custom games needed: Extract pawn promotion → create GameDefinition parser
- */
+# Kung Fu Chess — Architecture Notes
 
+The project is graded on **architecture**: correct separation of responsibilities
+between layers. This document records what each layer owns and why.
+
+## Layers & responsibilities (one job each)
+
+| Layer / class | Single responsibility |
+|---|---|
+| **model** | Hold data only, no game logic. `Position`, `Piece`, `Board`, `MovingPiece`, `GameState`. |
+| **parsing** | Turn raw text into a `Board` and own the token format. `BoardParser` (text→grid), `BoardValidator` (token check), `PieceMapper` (token↔`Piece`), `BoardMapper` (orchestrate parse→validate→map). |
+| **ruleengine** | Answer *"is this move allowed?"* without changing anything. `MoveValidator` = general checks that hold for **any** piece (source non-empty, not friendly-occupied, path clear) — depends only on `model`. `PieceRules` = piece-type-specific geometry. The gateway (`GameEngine`) combines the two. |
+| **gameengine** | Run the game. `GameEngine` = central gateway (validate, schedule, decide game-over). `RealTimeArbiter` = time + pieces-in-transit + atomic board updates. |
+| **event** | The input side. `EventEngine` (click semantics + selection), `EventMapper`/`InputMapper` (parse command / pixels), `EventDispatcher` + `GameEvent` impls. |
+| **view** | Render only. `BoardRenderer`. |
+| **controller** | Wire the chain, expose one entry point. `BoardController`. |
+| **config** | Constants only. `GameConfig`. |
+
+## Dependency direction (no cycles)
+
+```
+model  ◀── everything (model depends on nothing)
+config ◀── parsing, ruleengine, gameengine, event
+ruleengine ─▶ model, config
+gameengine ─▶ ruleengine, view, model, config
+event      ─▶ gameengine, model
+controller ─▶ parsing, gameengine, event, model
+```
+
+`model` and `config` are leaves. The input side (`event`) points at the engine; the
+engine never points back at input. No package depends on `controller` or `Main`.
+
+## Key design decision: movement rules as one switch, not a class-per-piece
+
+Movement rules live in a single class, `ruleengine.PieceRules`, as a `switch` over
+`Piece.Type`. `Piece` is just data that carries its type; `PieceRules` is the one
+place that knows how each type moves.
+
+- **Why not a class per piece (Strategy pattern)?** With many piece types that would
+  mean many small classes. A single switch keeps every rule visible in one place and
+  makes adding a piece a one-line change (`case X:`), which is easier to read and
+  maintain at scale.
+- Shared geometry (`pathClear`) is a private helper inside `PieceRules`.
+- `PieceRules` only *inspects* the board — it never moves or captures. Execution is
+  the arbiter's job.
+
+## Real-time model
+
+- The clock is **virtual**. `wait ms` advances `GameState.currentTime`; nothing sleeps.
+  This makes runs deterministic and testable.
+- **The board is only mutated on arrival.** While a piece is in transit the board is
+  unchanged; `BoardRenderer` shows the transit state without touching the model.
+  `RealTimeArbiter.update()` applies the source-clear + destination-set atomically,
+  handles mid-air captures, promotes pawns, and reports a king capture via `GameState`.
+
+## SRP self-audit (honest notes)
+
+Clean: model has no logic; parsing/rules/engine/view/event each own one concern; the
+input→engine direction is one-way.
+
+**Token format lives in one place:** `parsing.PieceMapper` is the only code that knows
+the `"wK"` encoding (both `parse` and `format`). The model (`Piece`) is built from a
+`Color` + `Type` via `Piece.of(...)` and carries no token knowledge, so a new
+input/output format touches only `PieceMapper`.
+
+Minor coupling worth knowing about (deliberate trade-offs, not accidental leaks):
+
+1. **`Piece.promotedAt(row, height)`** — promotion is a rule that lives on the model
+   piece, chosen so the engine and the renderer share one definition (DRY). Strictly a
+   rule, so it could move into `ruleengine` if promotion ever becomes configurable.
+2. **`GameEngine` holds a `BoardRenderer`** — so a `print` request has somewhere to go.
+   This couples the engine to the view; a stricter split would let the controller own
+   the renderer.
+3. **`view.BoardRenderer` depends on `parsing.PieceMapper`** — the renderer formats
+   pieces for output through the shared token codec. No cycle (`PieceMapper` depends
+   only on `model`); it is the price of keeping one single source for the encoding.
+4. **`Board.getGrid()`** — exposes the internal array; fine for internal use but a
+   caller could mutate the grid directly.
+
+Note: token/format validity now lives only in `parsing.BoardValidator.isValidToken`
+(it is the parsing concern), and `MoveValidator` no longer depends on `Piece.Type` or
+`GameConfig` — general movement rules only.
+
+## Extensibility
+
+- **New piece type:** add a `case` to `PieceRules.isValid`.
+- **New command:** add a `GameEvent` impl + a branch in `EventMapper`.
+- **New board backend:** `Board` accessors are the only contract the engine relies on.
