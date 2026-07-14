@@ -8,4 +8,8 @@ public class InputMapper {
         int col = pixelEvent.getX() / GameConfig.CELL_PIXEL_SIZE;
         return new CellClickEvent(row, col);
     }
+
+    public static CellClickEvent mapPixelToCell(int x, int y) {
+        return mapPixelToCell(new ClickEvent(x, y));
+    }
 }

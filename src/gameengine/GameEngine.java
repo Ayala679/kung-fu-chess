@@ -49,6 +49,11 @@ public class GameEngine {
         return arbiter.isBusyAt(row, col);
     }
 
+    /** Is the piece at this cell already committed to a move of its own? */
+    public boolean isAlreadyMoving(int row, int col) {
+        return arbiter.isAlreadyMoving(row, col);
+    }
+
     /** Bring the board up to date with the current virtual time. */
     public void refreshTime() {
         arbiter.update();
@@ -65,15 +70,12 @@ public class GameEngine {
     /** Request to move the piece at {@code from} to {@code to}. */
     public void requestMove(Position from, Position to) {
         if (gameState.isGameOver()) return;
-        if (arbiter.isBusyAt(from.getRow(), from.getCol())) return;
+        if (arbiter.isAlreadyMoving(from.getRow(), from.getCol())) return;
         if (!ruleEngine.isMoveAllowed(from, to)) return;
 
         Piece piece = board.getCell(from);
         int maxDistance = Math.max(from.rowDistance(to), from.colDistance(to));
-        long duration = (piece.getType() == Piece.Type.N)
-                ? GameConfig.KNIGHT_TOTAL_DURATION
-                : (maxDistance * GameConfig.MOVE_DURATION_PER_CELL);
-        arbiter.startMove(piece, from, to, duration);
+        arbiter.startMove(piece, from, to, piece.moveDuration(maxDistance));
     }
 
     /** Request to "jump" the piece on a cell in place (Kung-Fu Chess mechanic). */
@@ -84,13 +86,10 @@ public class GameEngine {
         refreshTime();
         Piece piece = board.getCell(row, col);
         if (piece == null) return;
-        if (arbiter.isBusyAt(row, col)) return;
+        if (arbiter.isAlreadyMoving(row, col)) return;
 
         if (arbiter.isTooLateToJump(row, col, piece)) {
-            board.setCell(row, col, null);
-            if (piece.getType() == Piece.Type.K) {
-                gameState.setGameOver();
-            }
+            arbiter.capture(row, col, piece);
         } else {
             arbiter.startJump(piece, new Position(row, col), GameConfig.JUMP_DURATION);
         }

@@ -39,7 +39,7 @@ public class EventEngine {
 
         if (selection == null) {
             // First selection: pick a piece that isn't mid-move.
-            if (clicked != null && !engine.isBusyAt(row, col)) {
+            if (clicked != null && !engine.isAlreadyMoving(row, col)) {
                 selection = new Position(row, col);
             }
             return;

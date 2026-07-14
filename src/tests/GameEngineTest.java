@@ -102,6 +102,28 @@ class GameEngineTest {
         assertNull(engine.pieceAt(0, 4));
     }
 
+    @Test void testThreatenedPieceCanFleeToASafeSquare() {
+        // Regression: requestMove used to check arbiter.isBusyAt(from), which
+        // also matches any incoming enemy slide targeting "from" - blocking a
+        // threatened piece from ever moving away, not just from being redirected.
+        Piece[][] grid = new Piece[8][8];
+        Piece attacker = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece victim = Piece.of(Piece.Color.BLACK, Piece.Type.R);
+        grid[0][0] = attacker;
+        grid[0][5] = victim;
+        GameEngine engine = engineWith(grid);
+
+        engine.requestMove(new Position(0, 0), new Position(0, 5)); // attacker heads toward the victim
+        engine.advanceTime(1);
+        engine.requestMove(new Position(0, 5), new Position(3, 5)); // victim flees down its own column
+        engine.advanceTime(100000);
+
+        // the victim escaped safely; the attacker's own (independent) slide still
+        // completes and simply lands on the now-empty square it was already headed to
+        assertEquals(victim, engine.pieceAt(3, 5));
+        assertEquals(attacker, engine.pieceAt(0, 5));
+    }
+
     @Test void testRequestMoveIgnoredWhenGameOver() {
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
@@ -120,11 +142,43 @@ class GameEngineTest {
         assertEquals(rook, engine.pieceAt(4, 0));
     }
 
-    @Test void testRequestJumpOnACellUnderIncomingSlideIsANoOp() {
-        // GameEngine.requestJump checks arbiter.isBusyAt(...) before
-        // arbiter.isTooLateToJump(...), and isBusyAt already matches any cell an
-        // active move is heading to - so a jump attempt here is silently ignored
-        // rather than resolved through the "too late" mid-air-capture logic.
+    @Test void testReactiveJumpWithEnoughTimeLeftSucceeds() {
+        // Real-time race: a reactive jump (started after the enemy) still wins
+        // if it FINISHES before the enemy's slide arrives.
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
+        grid[0][0] = rook;
+        grid[0][5] = knight;
+        GameEngine engine = engineWith(grid);
+
+        engine.requestMove(new Position(0, 0), new Position(0, 5)); // 5 cells -> 5000ms
+        engine.advanceTime(1);                                      // rook underway 1ms
+        engine.requestJump(0, 5);                                   // knight reacts, 999ms of slack
+        engine.advanceTime(100000);
+
+        assertEquals(knight, engine.pieceAt(0, 5));
+        assertNull(engine.pieceAt(0, 0));
+    }
+
+    @Test void testReactiveJumpTooCloseToArrivalDies() {
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
+        grid[0][0] = rook;
+        grid[0][7] = knight;
+        GameEngine engine = engineWith(grid);
+
+        engine.requestMove(new Position(0, 0), new Position(0, 7)); // 7 cells -> 7000ms
+        engine.advanceTime(6500);                                    // only 500ms left, jump needs 1000ms
+        engine.requestJump(0, 7);
+        engine.advanceTime(100000);
+
+        // too late to dodge: the rook arrives and takes the square: the knight dies
+        assertEquals(rook, engine.pieceAt(0, 7));
+    }
+
+    @Test void testPreemptiveJumpDefeatsALaterEnemySlide() {
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -132,10 +186,13 @@ class GameEngineTest {
         grid[0][3] = knight;
         GameEngine engine = engineWith(grid);
 
-        engine.requestMove(new Position(0, 0), new Position(0, 3));
-        engine.requestJump(0, 3);
+        engine.requestJump(0, 3); // knight defends first
+        engine.advanceTime(10);
+        engine.requestMove(new Position(0, 0), new Position(0, 3)); // rook attacks after
+        engine.advanceTime(100000);
 
         assertEquals(knight, engine.pieceAt(0, 3));
+        assertNull(engine.pieceAt(0, 0));
     }
 
     @Test void testRequestJumpOutOfBoundsIsIgnored() {

@@ -9,7 +9,7 @@ between layers. This document records what each layer owns and why.
 |---|---|
 | **model** | Hold data only, no game logic. `Position`, `Piece`, `Board`, `MovingPiece`, `GameState`. |
 | **parsing** | Turn raw text into a `Board` and own the token format. `BoardParser` (text→grid), `BoardValidator` (token check), `PieceMapper` (token↔`Piece`), `BoardMapper` (orchestrate parse→validate→map). |
-| **ruleengine** | Answer *"is this move allowed?"* without changing anything. `MoveValidator` = general checks that hold for **any** piece (source non-empty, not friendly-occupied, path clear) — depends only on `model`. `PieceRules` = piece-type-specific geometry. The gateway (`GameEngine`) combines the two. |
+| **ruleengine** | Answer *"is this move allowed?"* without changing anything. `MoveValidator` = general checks that hold for **any** piece (in bounds, source non-empty, not friendly-occupied, path clear) — depends only on `model`. `PieceRules` = piece-type-specific geometry. `RuleEngine` is the single entry point combining the two; `GameEngine` calls only `RuleEngine`, never `MoveValidator`/`PieceRules` directly. |
 | **gameengine** | Run the game. `GameEngine` = central gateway (validate, schedule, decide game-over). `RealTimeArbiter` = time + pieces-in-transit + atomic board updates. |
 | **event** | The input side. `EventEngine` (click semantics + selection), `EventMapper`/`InputMapper` (parse command / pixels), `EventDispatcher` + `GameEvent` impls. |
 | **view** | Render only. `BoardRenderer`. |
@@ -68,14 +68,15 @@ Minor coupling worth knowing about (deliberate trade-offs, not accidental leaks)
 1. **`Piece.promotedAt(row, height)`** — promotion is a rule that lives on the model
    piece, chosen so the engine and the renderer share one definition (DRY). Strictly a
    rule, so it could move into `ruleengine` if promotion ever becomes configurable.
-2. **`GameEngine` holds a `BoardRenderer`** — so a `print` request has somewhere to go.
+2. **`Piece.moveDuration(distance)`** — same trade-off, same reason: how long a move
+   takes depends on piece type, so it lives next to `Type` rather than as a duplicated
+   if/else inside `GameEngine`. `GameEngine.requestMove` just calls `piece.moveDuration(...)`.
+3. **`GameEngine` holds a `BoardRenderer`** — so a `print` request has somewhere to go.
    This couples the engine to the view; a stricter split would let the controller own
    the renderer.
-3. **`view.BoardRenderer` depends on `parsing.PieceMapper`** — the renderer formats
+4. **`view.BoardRenderer` depends on `parsing.PieceMapper`** — the renderer formats
    pieces for output through the shared token codec. No cycle (`PieceMapper` depends
    only on `model`); it is the price of keeping one single source for the encoding.
-4. **`Board.getGrid()`** — exposes the internal array; fine for internal use but a
-   caller could mutate the grid directly.
 
 Note: token/format validity now lives only in `parsing.BoardValidator.isValidToken`
 (it is the parsing concern), and `MoveValidator` no longer depends on `Piece.Type` or

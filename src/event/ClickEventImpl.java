@@ -14,9 +14,7 @@ public class ClickEventImpl implements GameEvent {
 
     @Override
     public void execute(EventEngine eventEngine) {
-        CellClickEvent cellEvent = InputMapper.mapPixelToCell(
-            new ClickEvent(x, y)
-        );
+        CellClickEvent cellEvent = InputMapper.mapPixelToCell(x, y);
         eventEngine.handleClick(cellEvent.getRow(), cellEvent.getCol());
     }
 

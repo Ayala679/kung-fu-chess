@@ -80,4 +80,26 @@ class BoardControllerTest {
 
         assertEquals("ERROR ROW_WIDTH_MISMATCH", output.trim());
     }
+
+    @Test void testHeadOnRookSwapWhiteRegisteredFirstWins() {
+        // End-to-end regression at the click level: two rooks swapping columns.
+        // White's move is requested first (by click order) - white must survive.
+        String input = "Board:\nwR . . bR\nCommands:\n"
+                + "click 50 50\nclick 350 50\n"
+                + "click 350 50\nclick 50 50\n"
+                + "wait 3000\nprint board\n";
+        String output = runAsMainWould(input);
+
+        assertEquals(". . . wR", output.trim());
+    }
+
+    @Test void testHeadOnRookSwapBlackRegisteredFirstWins() {
+        String input = "Board:\nwR . . bR\nCommands:\n"
+                + "click 350 50\nclick 50 50\n"
+                + "click 50 50\nclick 350 50\n"
+                + "wait 3000\nprint board\n";
+        String output = runAsMainWould(input);
+
+        assertEquals("bR . . .", output.trim());
+    }
 }

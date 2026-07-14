@@ -1,5 +1,7 @@
 package model;
 
+import config.GameConfig;
+
 /**
  * A chess piece: just its color and type. Pure domain data - it knows nothing
  * about how pieces are encoded as text (that lives in parsing.PieceMapper).
@@ -34,6 +36,19 @@ public final class Piece {
             return new Piece(color, Type.Q);
         }
         return this;
+    }
+
+    /**
+     * How long a move of {@code distance} cells takes for this piece type.
+     * Centralized here so each type's timing rule has exactly one home, even
+     * though today only the knight (a fixed hop) differs from the rest
+     * (distance-based).
+     */
+    public long moveDuration(int distance) {
+        if (type == Type.N) {
+            return GameConfig.KNIGHT_TOTAL_DURATION;
+        }
+        return distance * GameConfig.MOVE_DURATION_PER_CELL;
     }
 
     @Override
