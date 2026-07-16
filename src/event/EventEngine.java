@@ -3,6 +3,7 @@ package event;
 import gameengine.GameEngine;
 import model.Piece;
 import model.Position;
+import snapshot.GameSnapshot;
 
 /**
  * EventEngine: the input-side front controller.
@@ -38,8 +39,8 @@ public class EventEngine {
         Piece clicked = engine.pieceAt(row, col);
 
         if (selection == null) {
-            // First selection: pick a piece that isn't mid-move.
-            if (clicked != null && !engine.isAlreadyMoving(row, col)) {
+            // First selection: pick a piece that isn't mid-move or resting.
+            if (clicked != null && !engine.isAlreadyMoving(row, col) && !engine.isResting(row, col)) {
                 selection = new Position(row, col);
             }
             return;
@@ -65,5 +66,10 @@ public class EventEngine {
 
     public void print() {
         engine.printBoard();
+    }
+
+    /** Render-ready snapshot of the current board, including the pending selection. */
+    public GameSnapshot snapshot() {
+        return engine.buildSnapshot(selection);
     }
 }

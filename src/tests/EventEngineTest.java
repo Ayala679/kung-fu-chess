@@ -32,6 +32,32 @@ class EventEngineTest {
         assertEquals(rook, engine.pieceAt(4, 0));
     }
 
+    @Test void testSecondPieceCanStartHeadingToAContestedSquareThroughRealClickFlow() {
+        // Simulates the actual GUI flow: clicks via EventEngine, with real-time
+        // ticks interspersed exactly like the BoardWindow Timer does, and the
+        // second piece having sat idle for a while before either click - not
+        // freshly moved/resting itself.
+        Piece[][] grid = new Piece[8][8];
+        Piece rookA = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece rookB = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        grid[4][0] = rookA;
+        grid[0][4] = rookB;
+        GameEngine engine = engineWith(grid);
+        EventEngine events = new EventEngine(engine);
+
+        events.waitFor(2000); // rookB just sitting there for a while first
+
+        events.handleClick(4, 0); // select rookA
+        events.handleClick(4, 4); // send rookA toward (4,4)
+
+        for (int i = 0; i < 10; i++) events.waitFor(16); // a few real-time ticks, rookA still in flight
+
+        events.handleClick(0, 4); // select rookB
+        events.handleClick(4, 4); // send rookB toward the same square rookA is still heading to
+
+        assertTrue(engine.isBusyAt(0, 4)); // rookB's move must have actually started
+    }
+
     @Test void testFirstClickOnEmptyCellSelectsNothing() {
         GameEngine engine = engineWith(new Piece[8][8]);
         EventEngine events = new EventEngine(engine);

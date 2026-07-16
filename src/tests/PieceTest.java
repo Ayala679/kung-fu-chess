@@ -3,6 +3,7 @@ package tests;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+import config.GameConfig;
 import model.Piece;
 
 class PieceTest {
@@ -10,6 +11,28 @@ class PieceTest {
         Piece p = Piece.of(Piece.Color.WHITE, Piece.Type.K);
         assertEquals(Piece.Color.WHITE, p.getColor());
         assertEquals(Piece.Type.K, p.getType());
+    }
+
+    @Test void testDefaultRestDurations() {
+        Piece p = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        assertEquals(GameConfig.DEFAULT_LONG_REST_DURATION, p.getLongRestDuration());
+        assertEquals(GameConfig.DEFAULT_SHORT_REST_DURATION, p.getShortRestDuration());
+    }
+
+    @Test void testRestDurationsArePreservedThroughPromotion() {
+        Piece pawn = Piece.of(Piece.Color.WHITE, Piece.Type.P);
+        Piece promoted = pawn.promotedAt(0, 8);
+        assertEquals(pawn.getLongRestDuration(), promoted.getLongRestDuration());
+        assertEquals(pawn.getShortRestDuration(), promoted.getShortRestDuration());
+    }
+
+    @Test void testMaterialValues() {
+        assertEquals(1, Piece.of(Piece.Color.WHITE, Piece.Type.P).materialValue());
+        assertEquals(3, Piece.of(Piece.Color.WHITE, Piece.Type.N).materialValue());
+        assertEquals(3, Piece.of(Piece.Color.WHITE, Piece.Type.B).materialValue());
+        assertEquals(5, Piece.of(Piece.Color.WHITE, Piece.Type.R).materialValue());
+        assertEquals(9, Piece.of(Piece.Color.WHITE, Piece.Type.Q).materialValue());
+        assertEquals(0, Piece.of(Piece.Color.WHITE, Piece.Type.K).materialValue());
     }
 
     @Test void testEqualsAndHashCode() {

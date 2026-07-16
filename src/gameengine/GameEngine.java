@@ -1,12 +1,19 @@
 package gameengine;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import config.GameConfig;
 import model.Board;
 import model.GameState;
+import model.MoveLogEntry;
 import model.Piece;
 import model.Position;
 import ruleengine.RuleEngine;
 import view.BoardRenderer;
+import snapshot.GameSnapshot;
+import snapshot.MoveNotation;
+import snapshot.SnapshotBuilder;
 
 /**
  * GameEngine: the central gateway (like a Service) for all game actions.
@@ -24,6 +31,8 @@ public class GameEngine {
     private final RuleEngine ruleEngine;
     private final RealTimeArbiter arbiter;
     private final BoardRenderer renderer;
+    private final List<MoveLogEntry> whiteMoves = new ArrayList<>();
+    private final List<MoveLogEntry> blackMoves = new ArrayList<>();
 
     public GameEngine(Board board, GameState gameState) {
         this.board = board;
@@ -54,6 +63,11 @@ public class GameEngine {
         return arbiter.isAlreadyMoving(row, col);
     }
 
+    /** Is the piece at this cell still resting after its last move/jump? */
+    public boolean isResting(int row, int col) {
+        return arbiter.isResting(row, col);
+    }
+
     /** Bring the board up to date with the current virtual time. */
     public void refreshTime() {
         arbiter.update();
@@ -67,13 +81,48 @@ public class GameEngine {
 
     // ---- actions (the gateway) ----
 
+    /**
+     * Temporary diagnostic switch (off by default, so it never affects tests
+     * that capture console output) - GuiMain turns this on so requestMove
+     * rejections are visible while manually reproducing a reported bug.
+     */
+    public static boolean DEBUG_LOGGING = false;
+
+    private static void debugLog(String message) {
+        if (DEBUG_LOGGING) System.err.println(message);
+    }
+
     /** Request to move the piece at {@code from} to {@code to}. */
     public void requestMove(Position from, Position to) {
-        if (gameState.isGameOver()) return;
-        if (arbiter.isAlreadyMoving(from.getRow(), from.getCol())) return;
-        if (!ruleEngine.isMoveAllowed(from, to)) return;
+        if (gameState.isGameOver()) { debugLog("[requestMove] " + from + "->" + to + " REJECTED: game over"); return; }
+        if (arbiter.isAlreadyMoving(from.getRow(), from.getCol())) {
+            debugLog("[requestMove] " + from + "->" + to + " REJECTED: " + from + " is already moving");
+            return;
+        }
+        if (arbiter.isResting(from.getRow(), from.getCol())) {
+            debugLog("[requestMove] " + from + "->" + to + " REJECTED: " + from + " is resting");
+            return;
+        }
 
         Piece piece = board.getCell(from);
+        if (piece == null) {
+            debugLog("[requestMove] " + from + "->" + to + " REJECTED: no piece at " + from);
+            return;
+        }
+        if (arbiter.isKnightRaceConflict(to, piece)) {
+            debugLog("[requestMove] " + from + "->" + to + " REJECTED: knight race conflict at " + to);
+            return;
+        }
+        if (!ruleEngine.isMoveAllowed(from, to, arbiter.getActiveMoves(), gameState.getCurrentTime())) {
+            debugLog("[requestMove] " + from + "->" + to + " REJECTED: rule engine disallows it");
+            return;
+        }
+        debugLog("[requestMove] " + from + "->" + to + " ACCEPTED (" + piece + ")");
+
+        String notation = MoveNotation.describe(piece, to, board.getHeight());
+        List<MoveLogEntry> log = piece.getColor() == Piece.Color.WHITE ? whiteMoves : blackMoves;
+        log.add(new MoveLogEntry(gameState.getCurrentTime(), notation));
+
         int maxDistance = Math.max(from.rowDistance(to), from.colDistance(to));
         arbiter.startMove(piece, from, to, piece.moveDuration(maxDistance));
     }
@@ -87,6 +136,7 @@ public class GameEngine {
         Piece piece = board.getCell(row, col);
         if (piece == null) return;
         if (arbiter.isAlreadyMoving(row, col)) return;
+        if (arbiter.isResting(row, col)) return;
 
         if (arbiter.isTooLateToJump(row, col, piece)) {
             arbiter.capture(row, col, piece);
@@ -106,5 +156,42 @@ public class GameEngine {
     public void printBoard() {
         refreshTime();
         renderer.printBoard();
+    }
+
+    /** Render-ready snapshot of the current board, for the graphical view. */
+    public GameSnapshot buildSnapshot(Position selected) {
+        refreshTime();
+        return SnapshotBuilder.build(board, arbiter.getActiveMoves(), arbiter.getRestingPieces(), gameState, selected,
+                arbiter.getScore(Piece.Color.WHITE), arbiter.getScore(Piece.Color.BLACK),
+                whiteMoves, blackMoves, legalDestinationsFrom(selected));
+    }
+
+    /**
+     * Every square the selected piece could actually move to right now - the
+     * same gates {@link #requestMove} itself checks (game-over, already
+     * moving/resting, knight race conflicts, rule-engine legality), just
+     * without ever starting a move. Used so the view can show the player
+     * where a selected piece is allowed to go.
+     */
+    private List<Position> legalDestinationsFrom(Position selected) {
+        List<Position> destinations = new ArrayList<>();
+        if (selected == null || gameState.isGameOver()) return destinations;
+        if (arbiter.isAlreadyMoving(selected.getRow(), selected.getCol())) return destinations;
+        if (arbiter.isResting(selected.getRow(), selected.getCol())) return destinations;
+
+        Piece piece = board.getCell(selected);
+        if (piece == null) return destinations;
+
+        for (int row = 0; row < board.getHeight(); row++) {
+            for (int col = 0; col < board.getWidth(); col++) {
+                Position candidate = new Position(row, col);
+                if (candidate.equals(selected)) continue;
+                if (arbiter.isKnightRaceConflict(candidate, piece)) continue;
+                if (ruleEngine.isMoveAllowed(selected, candidate, arbiter.getActiveMoves(), gameState.getCurrentTime())) {
+                    destinations.add(candidate);
+                }
+            }
+        }
+        return destinations;
     }
 }

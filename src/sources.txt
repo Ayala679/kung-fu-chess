@@ -1,4 +1,5 @@
 Main.java
+GuiMain.java
 config/GameConfig.java
 controller/BoardController.java
 event/CellClickEvent.java
@@ -16,9 +17,11 @@ gameengine/GameEngine.java
 gameengine/RealTimeArbiter.java
 model/Board.java
 model/GameState.java
+model/MoveLogEntry.java
 model/MovingPiece.java
 model/Piece.java
 model/Position.java
+model/RestingPiece.java
 parsing/BoardMapper.java
 parsing/BoardParser.java
 parsing/BoardValidator.java
@@ -26,4 +29,14 @@ parsing/PieceMapper.java
 ruleengine/MoveValidator.java
 ruleengine/PieceRules.java
 ruleengine/RuleEngine.java
+snapshot/GameSnapshot.java
+snapshot/MoveNotation.java
+snapshot/PieceSnapshot.java
+snapshot/PieceVisualState.java
+snapshot/SnapshotBuilder.java
+view/BoardGeometry.java
 view/BoardRenderer.java
+view/BoardWindow.java
+view/Img.java
+view/ImgRenderer.java
+view/PieceSprites.java

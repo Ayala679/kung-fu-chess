@@ -1,6 +1,10 @@
 package ruleengine;
 
+import java.util.Collections;
+import java.util.List;
+
 import model.Board;
+import model.MovingPiece;
 import model.Piece;
 import model.Position;
 
@@ -21,8 +25,18 @@ public class RuleEngine {
     }
 
     public boolean isMoveAllowed(Position from, Position to) {
-        if (!validator.isGeneralMoveValid(from, to)) return false;
+        return isMoveAllowed(from, to, Collections.emptyList(), 0);
+    }
+
+    /**
+     * Same as {@link #isMoveAllowed(Position, Position)}, but aware of pieces
+     * currently in flight: a cell whose occupant already departed on a move of
+     * its own doesn't block this move, even though the board itself only
+     * clears that cell on arrival.
+     */
+    public boolean isMoveAllowed(Position from, Position to, List<MovingPiece> activeMoves, long currentTime) {
+        if (!validator.isGeneralMoveValid(from, to, activeMoves, currentTime)) return false;
         Piece piece = board.getCell(from);
-        return PieceRules.isValid(piece.getType(), board, from, to, piece);
+        return PieceRules.isValid(piece.getType(), board, from, to, piece, activeMoves, currentTime);
     }
 }
