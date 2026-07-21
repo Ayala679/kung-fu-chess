@@ -35,3 +35,12 @@ bin/
 
 ### Downloaded test/coverage tooling (fetched on demand by tools/run-tests.ps1) ###
 tools/*.jar
+
+### Downloaded runtime dependency jars (fetched on demand by tools/fetch-libs.ps1) ###
+lib/*.jar
+
+### Server-side account database (created on first run by server.KungFuChessServer) ###
+data/
+
+### Activity logs (server + client, created on first run - logging.ActivityLog) ###
+logs/

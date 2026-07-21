@@ -12,8 +12,12 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $tools = Join-Path $root "tools"
+$lib = Join-Path $root "lib"
 $out = Join-Path $root "out"
 $src = Join-Path $root "src"
+
+& (Join-Path $tools "fetch-libs.ps1")
+$libJars = (Get-ChildItem $lib -Filter *.jar | ForEach-Object { $_.FullName }) -join ";"
 
 $junitJar = Join-Path $tools "junit-console.jar"
 $jacocoAgent = Join-Path $tools "jacocoagent.jar"
@@ -44,11 +48,11 @@ New-Item -ItemType Directory -Force $testClasses | Out-Null
 
 Write-Host "Compiling main sources..."
 Push-Location $src
-& javac -encoding UTF-8 -d $mainClasses "@sources.txt"
+& javac -encoding UTF-8 -cp "$libJars" -d $mainClasses "@sources.txt"
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Main source compilation failed" }
 
 Write-Host "Compiling tests..."
-& javac -encoding UTF-8 -cp "$mainClasses;$junitJar" -d $testClasses (Get-ChildItem "tests\*.java" | ForEach-Object { $_.FullName })
+& javac -encoding UTF-8 -cp "$mainClasses;$junitJar;$libJars" -d $testClasses (Get-ChildItem "tests\*.java" | ForEach-Object { $_.FullName })
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Test compilation failed" }
 Pop-Location
 
@@ -56,7 +60,7 @@ $execFile = Join-Path $out "jacoco.exec"
 Remove-Item $execFile -ErrorAction SilentlyContinue
 
 Write-Host "Running tests..."
-& java "-javaagent:$jacocoAgent=destfile=$execFile" -cp "$mainClasses;$testClasses;$junitJar" org.junit.platform.console.ConsoleLauncher --scan-classpath="$testClasses" --details=tree
+& java "-javaagent:$jacocoAgent=destfile=$execFile" -cp "$mainClasses;$testClasses;$junitJar;$libJars" org.junit.platform.console.ConsoleLauncher --scan-classpath="$testClasses" --details=tree
 $testExit = $LASTEXITCODE
 
 Write-Host "Generating coverage report..."

@@ -20,6 +20,8 @@ public record GameSnapshot(
         int blackScore,
         List<MoveLogEntry> whiteMoves,
         List<MoveLogEntry> blackMoves,
-        List<Position> legalDestinations
+        List<Position> legalDestinations,
+        String whiteName,
+        String blackName
 ) {
 }

@@ -21,7 +21,9 @@ import model.RestingPiece;
  *
  * It holds the active moves, advances the simulated clock, decides when a move
  * arrives, and applies the board update atomically on arrival. When a king is
- * captured it reports it back through the shared GameState.
+ * captured it reports it back through the shared GameState. {@code
+ * jumpDefenses} is the one piece of state that outlives a single {@link
+ * #update()} call on purpose - see its own doc.
  *
  * All reading and advancing of virtual time happens here - no other class
  * touches the clock. Tests never sleep; they push time forward via {@link
@@ -32,8 +34,34 @@ public class RealTimeArbiter {
     private final GameState gameState;
     private final List<MovingPiece> activeMoves = new ArrayList<>();
     private final List<RestingPiece> restingPieces = new ArrayList<>();
+    private final Map<Position, JumpDefense> jumpDefenses = new HashMap<>();
     private int whiteScore = 0;
     private int blackScore = 0;
+
+    /**
+     * Proof that a jump completed at {@code square} at {@code completionTime} -
+     * kept independently of {@code activeMoves}/{@code restingPieces} so a
+     * jump that genuinely finished in time still defends the square on the
+     * attacker's real, later arrival, no matter how many ticks have passed in
+     * between (see {@link #isDefendedByATimelyJump} for why checking {@code
+     * activeMoves} alone isn't enough). Only counts for a limited grace
+     * period afterward, though - {@code piece.getShortRestDuration()} past
+     * {@code completionTime} - so a piece that jumped far too early, well
+     * before any attacker was even close, doesn't stay invincible forever;
+     * see {@link #isDefendedByATimelyJump} for the exact bound. Superseded
+     * (removed) even sooner than that the instant that square's occupant
+     * does anything else: leaves, jumps again, or is replaced by a
+     * capture/arrival - see every {@code jumpDefenses.remove(...)} call site.
+     */
+    private static final class JumpDefense {
+        final Piece piece;
+        final long completionTime;
+
+        JumpDefense(Piece piece, long completionTime) {
+            this.piece = piece;
+            this.completionTime = completionTime;
+        }
+    }
 
     public RealTimeArbiter(Board board, GameState gameState) {
         this.board = board;
@@ -74,10 +102,12 @@ public class RealTimeArbiter {
     }
 
     public void startMove(Piece piece, Position from, Position to, long duration) {
+        jumpDefenses.remove(from); // committing to a new errand supersedes any old completed-jump proof for this square
         activeMoves.add(new MovingPiece(piece, from, to, duration, gameState.getCurrentTime()));
     }
 
     public void startJump(Piece piece, Position pos, long duration) {
+        jumpDefenses.remove(pos); // a fresh jump supersedes any earlier one - a new proof lands if/when this one completes
         activeMoves.add(new MovingPiece(piece, pos, pos, duration, gameState.getCurrentTime()));
     }
 
@@ -114,8 +144,10 @@ public class RealTimeArbiter {
 
     /** Remove the piece sitting at (row, col) - e.g. a jump that came too late to escape a slide. */
     public void capture(int row, int col, Piece piece) {
+        Position pos = new Position(row, col);
         board.setCell(row, col, null);
-        clearRestAt(new Position(row, col));
+        clearRestAt(pos);
+        jumpDefenses.remove(pos);
         recordCapture(piece);
     }
 
@@ -160,12 +192,22 @@ public class RealTimeArbiter {
     /**
      * Is {@code square} currently defended, against an attacker of
      * {@code attackerColor} scheduled to arrive at {@code attackerArrivalTime},
-     * by an opposite-color in-place jump that finishes at or before that
-     * arrival? Only a jump still actually airborne counts - once it lands and
-     * enters its short-rest cooldown, that's a distinct state, not "still
-     * jumping", and no longer defends the square. A slow-enough attacker that
-     * arrives after the jump has already landed (whether the defender is
-     * still resting or long back to idle by then) will find it undefended.
+     * by an opposite-color in-place jump that finished at or before that
+     * arrival? Checks both a jump still genuinely airborne ({@code
+     * activeMoves}) and one that already completed within its grace period
+     * ({@code jumpDefenses}) - see that field's own doc for why the second
+     * check is needed: real play advances time in small (~16ms) increments,
+     * and JUMP_DURATION is always shorter than any slide it might be
+     * racing, so the jump has almost always already resolved out of {@code
+     * activeMoves} by the time a slower attacker's own arrival is even
+     * processed. Without the second check, a jump that genuinely finished
+     * in time would stop counting the moment its own tick happened to run -
+     * which is a real-world certainty, not an edge case, and defeats the
+     * entire mechanic outside of tests that jump virtual time forward in
+     * one huge step. The grace period itself keeps this from becoming
+     * permanent immunity: a jump thrown far too early, long before any
+     * attacker was actually close, must not still protect once its own
+     * short-rest window has elapsed.
      */
     private boolean isDefendedByATimelyJump(Position square, Piece.Color attackerColor, long attackerArrivalTime) {
         for (MovingPiece jump : activeMoves) {
@@ -175,7 +217,10 @@ public class RealTimeArbiter {
                 return true;
             }
         }
-        return false;
+        JumpDefense defense = jumpDefenses.get(square);
+        if (defense == null || defense.piece.getColor() == attackerColor) return false;
+        long graceDeadline = defense.completionTime + defense.piece.getShortRestDuration();
+        return defense.completionTime <= attackerArrivalTime && attackerArrivalTime <= graceDeadline;
     }
 
     /**
@@ -268,6 +313,7 @@ public class RealTimeArbiter {
         for (MovingPiece mp : arrived) {
             if (!mp.isMoving()) {
                 addRest(mp.getPiece(), mp.getTo(), currentTime, true); // completed jump - short rest
+                jumpDefenses.put(mp.getTo(), new JumpDefense(mp.getPiece(), mp.getArrivalTime()));
                 continue;
             }
             Position to = mp.getTo();
@@ -369,10 +415,15 @@ public class RealTimeArbiter {
      * A piece that just finished a move/jump can't act again until its rest
      * duration elapses. Clears any stale entry for this square first - whoever
      * was resting there before (now captured or replaced) is gone, and must not
-     * keep blocking whoever occupies the square now.
+     * keep blocking whoever occupies the square now. A normal move landing
+     * here (fromJump=false) also starts a fresh occupancy episode, so any
+     * earlier jump-defense proof for this square is cleared too - the
+     * jump-completion branch in {@link #update()} sets a fresh one itself,
+     * right after calling this with fromJump=true.
      */
     private void addRest(Piece piece, Position pos, long currentTime, boolean fromJump) {
         clearRestAt(pos);
+        if (!fromJump) jumpDefenses.remove(pos);
         long duration = fromJump ? piece.getShortRestDuration() : piece.getLongRestDuration();
         restingPieces.add(new RestingPiece(piece, pos, currentTime + duration, fromJump));
     }

@@ -33,6 +33,8 @@ public class GameEngine {
     private final BoardRenderer renderer;
     private final List<MoveLogEntry> whiteMoves = new ArrayList<>();
     private final List<MoveLogEntry> blackMoves = new ArrayList<>();
+    private String whiteName;
+    private String blackName;
 
     public GameEngine(Board board, GameState gameState) {
         this.board = board;
@@ -40,6 +42,12 @@ public class GameEngine {
         this.ruleEngine = new RuleEngine(board);
         this.arbiter = new RealTimeArbiter(board, gameState);
         this.renderer = new BoardRenderer(board, arbiter.getActiveMoves(), gameState);
+    }
+
+    /** Display names for the snapshot (e.g. "White (alice)") - null by default, as in offline play. */
+    public void setPlayerNames(String whiteName, String blackName) {
+        this.whiteName = whiteName;
+        this.blackName = blackName;
     }
 
     // ---- queries used by the event layer ----
@@ -146,6 +154,19 @@ public class GameEngine {
         refreshTime();
     }
 
+    /**
+     * Ends the game immediately in {@code resigningColor}'s favor of the
+     * opponent - a resignation, exactly like a king capture ends the game
+     * except there's no piece taken. Idempotent: does nothing once the game
+     * is already over. Generic on purpose - this class doesn't need to know
+     * *why* a color resigned (e.g. a network disconnect timeout), only who.
+     */
+    public void forceResign(Piece.Color resigningColor) {
+        if (gameState.isGameOver()) return;
+        Piece.Color winner = resigningColor == Piece.Color.WHITE ? Piece.Color.BLACK : Piece.Color.WHITE;
+        gameState.setGameOver(winner);
+    }
+
     /** Advance virtual time and settle any arrivals. */
     public void advanceTime(long ms) {
         if (gameState.isGameOver()) return;
@@ -163,7 +184,7 @@ public class GameEngine {
         refreshTime();
         return SnapshotBuilder.build(board, arbiter.getActiveMoves(), arbiter.getRestingPieces(), gameState, selected,
                 arbiter.getScore(Piece.Color.WHITE), arbiter.getScore(Piece.Color.BLACK),
-                whiteMoves, blackMoves, legalDestinationsFrom(selected));
+                whiteMoves, blackMoves, legalDestinationsFrom(selected), whiteName, blackName);
     }
 
     /**

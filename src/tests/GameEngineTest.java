@@ -183,6 +183,32 @@ class GameEngineTest {
         assertNull(engine.pieceAt(0, 0));            // ...and the attacking rook is gone
     }
 
+    @Test void testReactiveJumpStillSucceedsWithRealisticIncrementalTicking() {
+        // Regression: BoardWindow's Swing Timer and server.GameSession's
+        // ticker both advance virtual time in ~16ms steps, never in one huge
+        // jump like advanceTime(100000) above. A jump that finishes well
+        // before the attacker arrives used to stop counting as a defense the
+        // moment ITS OWN tick resolved it - long before the attacker's own,
+        // separate, later tick ever checked - so the exact scenario just
+        // above (jump defends an adjacent attack) silently never worked in
+        // real play, only in this test file's single-big-advanceTime style.
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
+        grid[0][0] = rook;
+        grid[0][1] = knight;
+        GameEngine engine = engineWith(grid);
+
+        engine.requestMove(new Position(0, 0), new Position(0, 1));
+        engine.requestJump(0, 1);
+        for (int i = 0; i < 150; i++) { // 150 * 16ms = 2400ms of realistic, incremental ticking
+            engine.advanceTime(16);
+        }
+
+        assertEquals(knight, engine.pieceAt(0, 1));
+        assertNull(engine.pieceAt(0, 0));
+    }
+
     @Test void testReactiveJumpTooCloseToArrivalDies() {
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
@@ -191,8 +217,8 @@ class GameEngineTest {
         grid[0][7] = knight;
         GameEngine engine = engineWith(grid);
 
-        engine.requestMove(new Position(0, 0), new Position(0, 7)); // 7 cells -> 4669ms
-        engine.advanceTime(4400);                                    // only 269ms left, jump needs 667ms
+        engine.requestMove(new Position(0, 0), new Position(0, 7)); // 7 cells -> 7000ms
+        engine.advanceTime(6700);                                    // only 300ms left, jump needs 500ms
         engine.requestJump(0, 7);
         engine.advanceTime(100000);
 
@@ -478,6 +504,52 @@ class GameEngineTest {
         GameSnapshot snapshot = engine.buildSnapshot(new Position(4, 4));
 
         assertTrue(snapshot.legalDestinations().isEmpty());
+    }
+
+    @Test void testPlayerNamesDefaultToNullAndFlowThroughOnceSet() {
+        GameEngine engine = engineWith(new Piece[8][8]);
+        assertNull(engine.buildSnapshot(null).whiteName());
+        assertNull(engine.buildSnapshot(null).blackName());
+
+        engine.setPlayerNames("alice", "bob");
+
+        assertEquals("alice", engine.buildSnapshot(null).whiteName());
+        assertEquals("bob", engine.buildSnapshot(null).blackName());
+    }
+
+    @Test void testForceResignEndsTheGameInTheOpponentsFavor() {
+        GameEngine engine = engineWith(new Piece[8][8]);
+        assertFalse(engine.isGameOver());
+
+        engine.forceResign(Piece.Color.WHITE);
+
+        assertTrue(engine.isGameOver());
+        assertEquals("BLACK", engine.buildSnapshot(null).winner());
+    }
+
+    @Test void testForceResignFromBlackAwardsWhite() {
+        GameEngine engine = engineWith(new Piece[8][8]);
+
+        engine.forceResign(Piece.Color.BLACK);
+
+        assertEquals("WHITE", engine.buildSnapshot(null).winner());
+    }
+
+    @Test void testForceResignIsANoOpOnceTheGameIsAlreadyOver() {
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece enemyKing = Piece.of(Piece.Color.BLACK, Piece.Type.K);
+        grid[4][4] = rook;
+        grid[4][0] = enemyKing;
+        GameEngine engine = engineWith(grid);
+
+        engine.requestMove(new Position(4, 4), new Position(4, 0)); // captures the black king
+        engine.advanceTime(100000);
+        assertEquals("WHITE", engine.buildSnapshot(null).winner());
+
+        engine.forceResign(Piece.Color.WHITE); // must not flip the winner that was already decided
+
+        assertEquals("WHITE", engine.buildSnapshot(null).winner());
     }
 
     @Test void testLegalDestinationsEmptyForAPieceThatIsResting() {

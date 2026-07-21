@@ -88,6 +88,25 @@ class EventEngineTest {
         assertEquals(rookB, engine.pieceAt(0, 0));
     }
 
+    @Test void testClickingTheSameSelectedPieceAgainCancelsTheSelection() {
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        grid[4][4] = rook;
+        GameEngine engine = engineWith(grid);
+        EventEngine events = new EventEngine(engine);
+
+        events.handleClick(4, 4); // select the rook
+        events.handleClick(4, 4); // click it again - cancels the selection
+        assertNull(events.snapshot().positionSelected());
+        assertTrue(events.snapshot().legalDestinations().isEmpty());
+
+        events.handleClick(4, 0); // NOT a move request - this is a fresh first click on an empty cell
+        engine.advanceTime(100000);
+
+        assertEquals(rook, engine.pieceAt(4, 4)); // never moved
+        assertNull(engine.pieceAt(4, 0));
+    }
+
     @Test void testOutOfBoundsClickCancelsPendingSelection() {
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);

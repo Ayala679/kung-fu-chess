@@ -30,6 +30,18 @@ public class SnapshotBuilder {
                                       int whiteScore, int blackScore,
                                       List<MoveLogEntry> whiteMoves, List<MoveLogEntry> blackMoves,
                                       List<Position> legalDestinations) {
+        return build(board, activeMoves, restingPieces, gameState, selection, whiteScore, blackScore,
+                whiteMoves, blackMoves, legalDestinations, null, null);
+    }
+
+    /** Same as above, with each side's display name (null when there isn't one - e.g. offline play). */
+    public static GameSnapshot build(Board board, List<MovingPiece> activeMoves,
+                                      List<RestingPiece> restingPieces,
+                                      GameState gameState, Position selection,
+                                      int whiteScore, int blackScore,
+                                      List<MoveLogEntry> whiteMoves, List<MoveLogEntry> blackMoves,
+                                      List<Position> legalDestinations,
+                                      String whiteName, String blackName) {
         int height = board.getHeight();
         int width = board.getWidth();
         long currentTime = gameState.getCurrentTime();
@@ -114,7 +126,7 @@ public class SnapshotBuilder {
         return new GameSnapshot(width, height, pieces, selection, gameState.isGameOver(), winner,
                 whiteScore, blackScore,
                 Collections.unmodifiableList(whiteMoves), Collections.unmodifiableList(blackMoves),
-                Collections.unmodifiableList(legalDestinations));
+                Collections.unmodifiableList(legalDestinations), whiteName, blackName);
     }
 
     private static String pieceId(Piece piece, int row, int col) {

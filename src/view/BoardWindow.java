@@ -10,7 +10,7 @@ import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 
-import event.EventEngine;
+import event.GameClient;
 import model.Position;
 import snapshot.GameSnapshot;
 
@@ -24,14 +24,14 @@ import snapshot.GameSnapshot;
 public class BoardWindow {
     private static final int TICK_MS = 16;
 
-    private final EventEngine eventEngine;
+    private final GameClient eventEngine;
     private final ImgRenderer renderer;
     private final JPanel panel;
     private final int boardWidthPx;
     private final int boardHeightPx;
     private volatile BufferedImage currentFrame;
 
-    public BoardWindow(EventEngine eventEngine, ImgRenderer renderer) {
+    public BoardWindow(GameClient eventEngine, ImgRenderer renderer) {
         this.eventEngine = eventEngine;
         this.renderer = renderer;
         this.boardWidthPx = renderer.getBoardWidthPx();
@@ -91,7 +91,12 @@ public class BoardWindow {
     }
 
     public void show() {
-        JFrame frame = new JFrame("Kung Fu Chess");
+        show(null);
+    }
+
+    /** Same as {@link #show()}, but with a subtitle (e.g. a room code) appended to the window title. */
+    public void show(String subtitle) {
+        JFrame frame = new JFrame(subtitle == null || subtitle.isEmpty() ? "Kung Fu Chess" : "Kung Fu Chess - " + subtitle);
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.add(panel);
         frame.pack();

@@ -49,8 +49,9 @@ jump in place. There are no turns to wait through - both sides can act at
 any time, and the board keeps animating continuously.
 
 ```bash
+powershell -File tools/fetch-libs.ps1   # downloads lib/Java-WebSocket + slf4j-api once
 cd src
-javac -encoding UTF-8 -d ../out @sources.txt
+javac -encoding UTF-8 -cp "$(ls ../lib/*.jar | tr '\n' ';')" -d ../out @sources.txt
 cd ..
 java -cp out GuiMain < resources/demo_board_8x8.txt
 ```
@@ -64,10 +65,74 @@ command, which is what the automated tests and grading tools drive.
 java -cp out Main < input.txt
 ```
 
+## Playing it over the network
+
+`NetworkGuiMain` opens the exact same interactive window as `GuiMain`, but
+against a `server.KungFuChessServer` instead of a local, in-process engine -
+every connected side sees the others' moves live. The flow, all before the
+board window ever opens:
+
+1. **Sign in** - a small alert (server address, username, password,
+   Login/Register). Registering creates a new account (starting rating
+   **1200**) in a SQLite file on the server (`data/kungfuchess.db` by
+   default); logging in checks the password against it.
+2. **Pick a game** - another alert: **Quick Play** (paired automatically
+   with any other waiting player whose rating is within ±100 of yours - if
+   no one suitable is waiting yet, you just wait) or **Room** (Create
+   generates a short code, shown in the window's title bar; Join enters an
+   existing one by code). Inside a room, the first two to join play White
+   and Black; anyone after that joins as a read-only **spectator**.
+3. A quick on-screen 3-2-1, then the board.
+
+If a seated player's connection drops, that side auto-resigns after 20
+seconds (no visible countdown - just a functional forfeit) and ratings
+update normally. Both the server and each client append a plain-text
+activity log (`logs/server.log`, `logs/client-<username>.log`).
+
+```bash
+# terminal 1 - the server (listens on port 8887 by default)
+java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar" server.KungFuChessServer
+
+# one terminal per participant; each opens the sign-in alert first
+java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar" NetworkGuiMain
+```
+
+See [CLAUDE.md](CLAUDE.md) for how the networking layer is wired
+(`bus`/`net`/`server`/`logging` packages) without touching any of the core
+engine classes above (aside from one deliberate, narrow exception -
+`GameEngine.forceResign`, used for the disconnect timeout).
+
 ## Package structure
 
 ```
 src/
+├── bus/          ← generic in-process publish/subscribe (used by the server to
+│   │               broadcast snapshot updates; not used by offline play)
+│   └── Bus.java
+│
+├── net/          ← the client<->server wire protocol, shared source (no separate
+│   │               client/server modules - this project has no build tool)
+│   ├── Protocol.java       message-prefix constants (LOGIN/REGISTER/AUTH_OK/PLAY/
+│   │                       CREATE_ROOM/JOIN_ROOM/WAITING/ROOM_CREATED/SEAT/ERROR/STATE)
+│   ├── Seat.java           WHITE/BLACK/VIEWER - what a connection was assigned
+│   ├── SnapshotCodec.java  GameSnapshot ⇄ plain-text block (no JSON dependency)
+│   ├── NetworkGameClient.java  client-side event.GameClient impl over a WebSocket
+│   ├── LoginDialog.java    the sign-in alert shown before anything else opens
+│   └── LobbyDialog.java    Quick Play / Room (Create/Join) alert shown after sign-in
+│
+├── server/       ← the networked game server (see "Playing it over the network")
+│   ├── KungFuChessServer.java  accepts connections, authenticates, routes lobby commands
+│   ├── Lobby.java              the "tournament manager": rooms + ELO matchmaking queue
+│   ├── GameSession.java        owns one game's Board/GameEngine + ticker + ratings +
+│   │                           spectators + the disconnect auto-resign timer
+│   └── auth/
+│       ├── UserRepository.java   accounts + ratings, persisted to a SQLite file
+│       ├── PasswordHasher.java   salted SHA-256 (passwords are never stored in the clear)
+│       └── EloCalculator.java    standard ELO win/loss rating update
+│
+├── logging/      ← append-only timestamped text logs (server + each client)
+│   └── ActivityLog.java
+│
 ├── model/        ← pure data (no game logic)
 │   ├── Position.java      immutable (row,col) + distance helpers
 │   ├── Piece.java         color + type, promotedAt() (no token knowledge)
@@ -92,7 +157,12 @@ src/
 │                           collisions, capture scoring and the virtual clock
 │
 ├── event/        ← the input side
-│   ├── EventEngine.java    click semantics (select / cancel / re-select / move request)
+│   ├── EventEngine.java    owns the local, single-mouse selection; delegates the
+│   │                       actual click rules to ClickSelector
+│   ├── ClickSelector.java  select / cancel / re-select / move-request, as a pure
+│   │                       function - shared with server.GameSession's per-color use
+│   ├── GameClient.java     the interface BoardWindow needs - EventEngine (offline) and
+│   │                       net.NetworkGameClient (networked) both implement it
 │   ├── EventMapper.java    command string → GameEvent
 │   ├── InputMapper.java    pixel coords → cell coords
 │   ├── EventDispatcher.java routes events to the EventEngine
@@ -119,7 +189,8 @@ src/
 │   └── GameConfig.java     all constants (durations, cell size, token patterns)
 │
 ├── Main.java               console entry point: reads stdin, drives BoardController
-└── GuiMain.java            graphical entry point: opens the interactive BoardWindow
+├── GuiMain.java            graphical entry point: opens the interactive BoardWindow, offline
+└── NetworkGuiMain.java     graphical entry point: opens the same BoardWindow, over the network
 ```
 
 ## How a command flows

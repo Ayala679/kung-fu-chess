@@ -71,7 +71,7 @@ public class ImgRenderer {
             drawPiece(frame, piece, boardWidthPx, boardHeightPx);
         }
 
-        drawScores(frame, snapshot.whiteScore(), snapshot.blackScore());
+        drawScores(frame, snapshot.whiteScore(), snapshot.blackScore(), snapshot.whiteName(), snapshot.blackName());
         drawMoveTable(frame, "Black", snapshot.blackMoves(), 20);
         drawMoveTable(frame, "White", snapshot.whiteMoves(), BOARD_OFFSET_X + boardWidthPx + 20);
 
@@ -151,12 +151,14 @@ public class ImgRenderer {
     }
 
     /** Black's score sits up top (Black's side of the board); White's sits at the bottom (White's side). */
-    private void drawScores(Img frame, int whiteScore, int blackScore) {
+    private void drawScores(Img frame, int whiteScore, int blackScore, String whiteName, String blackName) {
         int canvasWidth = frame.get().getWidth();
         int canvasHeight = frame.get().getHeight();
         float fontSize = 2.6f;
-        drawCenteredText(frame, "Black   Score: " + blackScore, canvasWidth, 50, fontSize);
-        drawCenteredText(frame, "White   Score: " + whiteScore, canvasWidth, canvasHeight - 30, fontSize);
+        String blackLabel = blackName == null ? "Black" : "Black (" + blackName + ")";
+        String whiteLabel = whiteName == null ? "White" : "White (" + whiteName + ")";
+        drawCenteredText(frame, blackLabel + "   Score: " + blackScore, canvasWidth, 50, fontSize);
+        drawCenteredText(frame, whiteLabel + "   Score: " + whiteScore, canvasWidth, canvasHeight - 30, fontSize);
     }
 
     // Img has no text-measurement API, so the rendered width is approximated

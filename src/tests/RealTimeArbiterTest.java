@@ -403,10 +403,10 @@ class RealTimeArbiterTest {
         GameState state = new GameState();
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
-        arbiter.startJump(knight, new Position(0, 3), 500); // defender jumps right away
-        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 2000); // attacker still far off
+        arbiter.startJump(knight, new Position(0, 3), 500); // defender jumps right away, completes at t=500
+        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 2000); // attacker still far off, arrives t=2000
 
-        state.advanceTime(900); // well after the jump AND its short-rest cooldown have both finished
+        state.advanceTime(900); // well after the jump itself (and its short-rest cooldown) have finished
         arbiter.update();
 
         assertTrue(arbiter.getActiveMoves().stream().anyMatch(mp -> mp.getPiece() == rook)); // still on its way, not destroyed early
@@ -415,16 +415,20 @@ class RealTimeArbiterTest {
         state.advanceTime(1100); // now at t=2000, the rook's own arrival
         arbiter.update();
 
-        // the knight's defense has long since expired by the time the rook actually gets here
+        // The knight's jump-defense grace period (completion + its own short-rest
+        // duration) is long over by t=2000 - a jump thrown this early doesn't grant
+        // permanent immunity, so the rook wins the race after all.
         assertEquals(rook, board.getCell(0, 3));
         assertNull(board.getCell(0, 0));
     }
 
-    @Test void testJumpDefenseDoesNotProtectDuringTheRestThatFollowsIt() {
-        // "Jumping" and "resting after a jump" are different states - only
-        // the former defends the square. Once the jump itself has landed
-        // (even if the short-rest cooldown it triggered hasn't finished yet),
-        // an attacker that arrives afterward finds the square undefended.
+    @Test void testJumpDefenseStillProtectsDuringTheRestThatFollowsIt() {
+        // "Jumping" and "resting after a jump" are different states, but both
+        // still count as proof the jump finished in time: an attacker whose
+        // own arrival is at or after the jump's completion loses the race,
+        // regardless of whether the defender has since started resting -
+        // see RealTimeArbiterTest.testJumpDefenseIsGoneAfterTheDefenderMovesAway
+        // for what actually *does* end the protection.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.BLACK, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.WHITE, Piece.Type.N);
@@ -443,8 +447,72 @@ class RealTimeArbiterTest {
         state.advanceTime(200); // now t=700 - knight is merely resting (not jumping) when the rook arrives
         arbiter.update();
 
-        assertEquals(rook, board.getCell(0, 3)); // resting alone doesn't defend - the rook lands normally
+        assertEquals(knight, board.getCell(0, 3)); // the jump was still in time - the rook is captured instead
         assertNull(board.getCell(0, 0));
+    }
+
+    @Test void testJumpDefenseExpiresOnceTheDefenderJumpsAgain() {
+        // A jump-defense proof isn't permanent - it's superseded the instant
+        // that square's occupant does something new. Here, the knight's
+        // first jump would (on a naive timestamp-only check) still "cover"
+        // an attacker arriving well after it - but the knight jumped again
+        // in between, and that second jump hasn't finished yet when the
+        // attacker shows up, so the old proof must not still count.
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.BLACK, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.WHITE, Piece.Type.N);
+        grid[0][0] = rook;
+        grid[0][3] = knight;
+        Board board = new Board(grid);
+        GameState state = new GameState();
+        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
+
+        arbiter.startJump(knight, new Position(0, 3), 100); // first jump, completes t=100
+        state.advanceTime(100);
+        arbiter.update(); // proof recorded: completed at t=100
+
+        // Both started at t=100: knight jumps again (clearing the old proof;
+        // completes t=1100), rook attacks (arrives t=600 - after the OLD
+        // proof's t=100, but mid-flight of the still-unfinished new jump).
+        arbiter.startJump(knight, new Position(0, 3), 1000);
+        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 500);
+
+        state.advanceTime(500); // t=600: rook arrives; the second jump is still airborne, not yet proof of anything
+        arbiter.update();
+
+        assertEquals(rook, board.getCell(0, 3)); // the stale t=100 proof must not have covered this
+        assertNull(board.getCell(0, 0));
+    }
+
+    @Test void testJumpDefenseIsGoneAfterTheDefenderMovesAway() {
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.BLACK, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.WHITE, Piece.Type.N);
+        Piece filler = Piece.of(Piece.Color.WHITE, Piece.Type.P);
+        grid[0][0] = rook;
+        grid[0][3] = knight;
+        Board board = new Board(grid);
+        GameState state = new GameState();
+        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
+
+        arbiter.startJump(knight, new Position(0, 3), 500); // knight jumps, completes t=500
+        state.advanceTime(500);
+        arbiter.update();
+
+        // The knight moves away from (0,3) entirely - its old jump-defense
+        // proof for that square must go with it, not linger for whoever (or
+        // nothing) is left behind.
+        arbiter.startMove(knight, new Position(0, 3), new Position(1, 3), 667);
+        state.advanceTime(667);
+        arbiter.update();
+
+        board.setCell(0, 3, filler); // some unrelated pawn now happens to sit where the knight used to be
+        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 2000);
+        state.advanceTime(2000);
+        arbiter.update();
+
+        assertEquals(knight, board.getCell(1, 3)); // the knight itself was never attacked - still safe where it moved to
+        assertEquals(rook, board.getCell(0, 3)); // ...but the stale proof did not save the filler pawn left behind
     }
 
     @Test void testMidAirCaptureOfKingEndsGame() {
