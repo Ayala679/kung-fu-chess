@@ -9,33 +9,34 @@ public class GameConfig {
     // (slowed down from the original 2/3 second - the previous pace was too
     // fast to comfortably react to). Most other durations below keep the
     // same ratio to this base they always had, so scaling this one number
-    // rescales the whole game - DEFAULT_SHORT_REST_DURATION is the one
-    // deliberate exception, see its own comment.
+    // rescales the whole game.
     public static final long MOVE_DURATION_PER_CELL = 1000L; // 1 second
     public static final long KNIGHT_TOTAL_DURATION = 3000L; // 3x the per-cell duration
-    // Deliberately shorter than a single-cell move (not "was equal" anymore):
-    // a jump can only ever defend if there's still at least JUMP_DURATION of
-    // travel time left on the incoming attack when it's requested - if it
-    // exactly equaled MOVE_DURATION_PER_CELL, reacting to an adjacent attack
-    // (which takes exactly one cell's worth of time) could only ever succeed
-    // on a razor's-edge, instant-reaction tie, and any later reaction -
-    // however "last second" it visually looked - was mathematically doomed.
-    public static final long JUMP_DURATION = 500L;
+    // A successful dodge requires the jump to still be genuinely airborne -
+    // not yet landed - at the moment the incoming attack actually arrives
+    // (see gameengine.RealTimeArbiter.isTooLateToJump/isProtectedByAnInProgressJump);
+    // landing back down onto the attacker afterward is what captures it.
+    // Deliberately shorter than a single-cell move (the fastest possible
+    // attack, MOVE_DURATION_PER_CELL): reacting the instant an adjacent
+    // attack starts (with the full 1000ms still on the clock) must still
+    // fail - jumping "too early" just means landing back down long before
+    // the attack arrives, an ordinary, undefended sitting duck by then. Only
+    // reacting once the incoming attack has at most JUMP_DURATION left on
+    // its own clock succeeds - widen this value to make that reaction
+    // window more forgiving; keep it below MOVE_DURATION_PER_CELL so the
+    // most common (adjacent) attack still requires *some* real reaction
+    // rather than succeeding no matter when you jump.
+    public static final long JUMP_DURATION = 700L;
 
     // default rest durations after a move (long) or a jump (short) - stored on
     // each Piece instance (model.Piece.getLongRestDuration()/getShortRestDuration()),
     // this is just the value new pieces start with
     public static final long DEFAULT_LONG_REST_DURATION = 1000L; // equal to the per-cell duration
-    // Deliberately NOT scaled at the same 0.4x ratio the previous pace used
-    // (that would be ~400ms): gameengine.RealTimeArbiter's jump-defense grace
-    // period is JUMP_DURATION + this value, and that combined window has to
-    // comfortably cover the single fastest possible attack (one cell,
-    // MOVE_DURATION_PER_CELL) even for an instantly-reacting defender, or a
-    // dodge against the most common capture shape in the game could never
-    // mathematically succeed. 500 (jump) + 600 (this) = 1100ms, a 100ms
-    // cushion over the 1000ms adjacent-attack case - don't shrink this
-    // below JUMP_DURATION's shortfall against MOVE_DURATION_PER_CELL without
-    // re-checking that math.
+    // Purely a cosmetic/balance choice now (how long a piece is briefly
+    // vulnerable again right after a jump) - not coupled to JUMP_DURATION or
+    // to any dodge-timing math, since the dodge itself now resolves entirely
+    // at the jump's own landing (see JUMP_DURATION's comment above), not
+    // during any post-landing window.
     public static final long DEFAULT_SHORT_REST_DURATION = 600L;
 
     // pixel size of a cell when converting click coordinates to board indices

@@ -23,6 +23,12 @@ import model.Position;
 public final class ClickSelector {
     private ClickSelector() {}
 
+    /** What this click actually did, beyond just the resulting selection - lets a caller that cares (server.GameSession) tell a real move attempt from a mere select/deselect/reselect. */
+    public enum Outcome { NO_MOVE_ATTEMPTED, MOVE_ACCEPTED, MOVE_REJECTED }
+
+    /** The next selection to store, plus what this click did (see {@link Outcome}). */
+    public record Result(Position selection, Outcome outcome) {}
+
     /**
      * @param selection     the caller's current selection (null if none)
      * @param requiredColor if non-null, only a piece of this color may ever
@@ -31,12 +37,13 @@ public final class ClickSelector {
      *                      onto) the opponent's pieces. Null means any piece
      *                      may be selected, matching local/offline play
      *                      where one mouse controls both sides.
-     * @return the selection to store from now on (never mutates the engine
-     *         except via {@link GameEngine#requestMove} when a move is sent)
+     * @return the resulting selection plus what this click did (never
+     *         mutates the engine except via {@link GameEngine#requestMove}
+     *         when a move is sent)
      */
-    public static Position handleClick(GameEngine engine, Position selection, int row, int col, Piece.Color requiredColor) {
-        if (engine.isGameOver()) return selection;
-        if (!engine.inBounds(row, col)) return null; // cancel a pending selection; no-op otherwise
+    public static Result handleClick(GameEngine engine, Position selection, int row, int col, Piece.Color requiredColor) {
+        if (engine.isGameOver()) return new Result(selection, Outcome.NO_MOVE_ATTEMPTED);
+        if (!engine.inBounds(row, col)) return new Result(null, Outcome.NO_MOVE_ATTEMPTED); // cancel a pending selection; no-op otherwise
 
         engine.refreshTime();
         Piece clicked = engine.pieceAt(row, col);
@@ -45,23 +52,23 @@ public final class ClickSelector {
             // First selection: pick a piece that isn't mid-move or resting.
             if (clicked != null && (requiredColor == null || clicked.getColor() == requiredColor)
                     && !engine.isAlreadyMoving(row, col) && !engine.isResting(row, col)) {
-                return new Position(row, col);
+                return new Result(new Position(row, col), Outcome.NO_MOVE_ATTEMPTED);
             }
-            return null;
+            return new Result(null, Outcome.NO_MOVE_ATTEMPTED);
         }
 
         // Second click.
         Position clickedPos = new Position(row, col);
         if (clickedPos.equals(selection)) {
-            return null; // clicking the already-selected piece again cancels the selection
+            return new Result(null, Outcome.NO_MOVE_ATTEMPTED); // clicking the already-selected piece again cancels the selection
         }
 
         Piece selectedPiece = engine.pieceAt(selection.getRow(), selection.getCol());
         if (clicked != null && selectedPiece != null && clicked.getColor() == selectedPiece.getColor()) {
-            return clickedPos; // re-select our own other piece
+            return new Result(clickedPos, Outcome.NO_MOVE_ATTEMPTED); // re-select our own other piece
         }
 
-        engine.requestMove(selection, clickedPos);
-        return null;
+        boolean accepted = engine.requestMove(selection, clickedPos);
+        return new Result(null, accepted ? Outcome.MOVE_ACCEPTED : Outcome.MOVE_REJECTED);
     }
 }

@@ -138,23 +138,29 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
 
     @Override
     public void onMessage(String message) {
-        if (message.startsWith(Protocol.AUTH_OK + " ")) {
+        if (message.startsWith(Protocol.AUTH_OK + "|")) {
             rating = Integer.parseInt(message.substring(Protocol.AUTH_OK.length() + 1).trim());
             activityLog.log("authenticated, rating=" + rating);
             authComplete.countDown();
         } else if (message.equals(Protocol.WAITING)) {
             activityLog.log("waiting for an opponent");
             if (lobbyListener != null) lobbyListener.onWaiting();
-        } else if (message.startsWith(Protocol.ROOM_CREATED + " ")) {
+        } else if (message.startsWith(Protocol.ROOM_CREATED + "|")) {
             roomCode = message.substring(Protocol.ROOM_CREATED.length() + 1).trim();
             activityLog.log("room created: " + roomCode);
             if (lobbyListener != null) lobbyListener.onRoomCreated(roomCode);
-        } else if (message.startsWith(Protocol.SEAT + " ")) {
-            assignedSeat = Seat.valueOf(message.substring(Protocol.SEAT.length() + 1).trim());
+        } else if (message.startsWith(Protocol.WELCOME + "|role=")) {
+            assignedSeat = Seat.valueOf(message.substring((Protocol.WELCOME + "|role=").length()).trim());
             activityLog.log("seated as " + assignedSeat);
             if (lobbyListener != null) lobbyListener.onSeated(assignedSeat);
+        } else if (message.startsWith(Protocol.COMMAND_RESULT + "|")) {
+            activityLog.log("command result: " + message.substring(Protocol.COMMAND_RESULT.length() + 1).trim());
+        } else if (message.startsWith(Protocol.EVENT + "|")) {
+            activityLog.log("event: " + message.substring(Protocol.EVENT.length() + 1).trim());
         } else if (message.startsWith(Protocol.ERROR)) {
-            serverError = message.substring(Protocol.ERROR.length()).trim();
+            serverError = message.startsWith(Protocol.ERROR + "|")
+                    ? message.substring(Protocol.ERROR.length() + 1)
+                    : message.substring(Protocol.ERROR.length()).trim();
             activityLog.log("ERROR from server: " + serverError);
             // Whichever stage is currently being awaited must not hang forever.
             authComplete.countDown();

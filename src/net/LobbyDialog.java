@@ -27,6 +27,15 @@ public final class LobbyDialog {
      * user cancels or the server refuses the request.
      */
     public static void chooseAndWait(NetworkGameClient client) {
+        if (client.getAssignedSeat() != null) {
+            // KungFuChessServer already silently reconnected us to a game we
+            // were disconnected from (see Lobby.tryReconnect) - SEAT/STATE
+            // arrived right after AUTH_OK, before this dialog ever ran.
+            // Asking to pick Quick Play/Room again would just send a lobby
+            // command to a connection already attached to a GameSession.
+            return;
+        }
+
         String[] options = {"Quick Play", "Room...", "Cancel"};
         int choice = JOptionPane.showOptionDialog(null,
                 "Signed in - rating " + client.getRating() + ".\nHow do you want to play?",

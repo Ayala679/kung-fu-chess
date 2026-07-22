@@ -24,4 +24,11 @@ public record GameSnapshot(
         String whiteName,
         String blackName
 ) {
+    /** Defensively copies every list field so the "Immutable" claim above holds regardless of what the caller passes in or does with its own reference afterward. */
+    public GameSnapshot {
+        pieces = List.copyOf(pieces);
+        whiteMoves = List.copyOf(whiteMoves);
+        blackMoves = List.copyOf(blackMoves);
+        legalDestinations = List.copyOf(legalDestinations);
+    }
 }

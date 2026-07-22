@@ -43,6 +43,8 @@ ruleengine/RuleEngine.java
 server/GameSession.java
 server/KungFuChessServer.java
 server/Lobby.java
+server/auth/AuthCommandParser.java
+server/auth/AuthController.java
 server/auth/EloCalculator.java
 server/auth/PasswordHasher.java
 server/auth/UserRepository.java

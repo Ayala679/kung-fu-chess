@@ -100,30 +100,30 @@ public class GameEngine {
         if (DEBUG_LOGGING) System.err.println(message);
     }
 
-    /** Request to move the piece at {@code from} to {@code to}. */
-    public void requestMove(Position from, Position to) {
-        if (gameState.isGameOver()) { debugLog("[requestMove] " + from + "->" + to + " REJECTED: game over"); return; }
+    /** Request to move the piece at {@code from} to {@code to}. Returns true iff every gate passed and the move actually started. */
+    public boolean requestMove(Position from, Position to) {
+        if (gameState.isGameOver()) { debugLog("[requestMove] " + from + "->" + to + " REJECTED: game over"); return false; }
         if (arbiter.isAlreadyMoving(from.getRow(), from.getCol())) {
             debugLog("[requestMove] " + from + "->" + to + " REJECTED: " + from + " is already moving");
-            return;
+            return false;
         }
         if (arbiter.isResting(from.getRow(), from.getCol())) {
             debugLog("[requestMove] " + from + "->" + to + " REJECTED: " + from + " is resting");
-            return;
+            return false;
         }
 
         Piece piece = board.getCell(from);
         if (piece == null) {
             debugLog("[requestMove] " + from + "->" + to + " REJECTED: no piece at " + from);
-            return;
+            return false;
         }
         if (arbiter.isKnightRaceConflict(to, piece)) {
             debugLog("[requestMove] " + from + "->" + to + " REJECTED: knight race conflict at " + to);
-            return;
+            return false;
         }
         if (!ruleEngine.isMoveAllowed(from, to, arbiter.getActiveMoves(), gameState.getCurrentTime())) {
             debugLog("[requestMove] " + from + "->" + to + " REJECTED: rule engine disallows it");
-            return;
+            return false;
         }
         debugLog("[requestMove] " + from + "->" + to + " ACCEPTED (" + piece + ")");
 
@@ -133,25 +133,30 @@ public class GameEngine {
 
         int maxDistance = Math.max(from.rowDistance(to), from.colDistance(to));
         arbiter.startMove(piece, from, to, piece.moveDuration(maxDistance));
+        return true;
     }
 
-    /** Request to "jump" the piece on a cell in place (Kung-Fu Chess mechanic). */
-    public void requestJump(int row, int col) {
-        if (gameState.isGameOver()) return;
-        if (!inBounds(row, col)) return;
+    /** Request to "jump" the piece on a cell in place (Kung-Fu Chess mechanic). Returns true iff the jump actually started (false if rejected, or if it was too late and the piece was captured instead). */
+    public boolean requestJump(int row, int col) {
+        if (gameState.isGameOver()) return false;
+        if (!inBounds(row, col)) return false;
 
         refreshTime();
         Piece piece = board.getCell(row, col);
-        if (piece == null) return;
-        if (arbiter.isAlreadyMoving(row, col)) return;
-        if (arbiter.isResting(row, col)) return;
+        if (piece == null) return false;
+        if (arbiter.isAlreadyMoving(row, col)) return false;
+        if (arbiter.isResting(row, col)) return false;
 
+        boolean started;
         if (arbiter.isTooLateToJump(row, col, piece)) {
             arbiter.capture(row, col, piece);
+            started = false;
         } else {
             arbiter.startJump(piece, new Position(row, col), GameConfig.JUMP_DURATION);
+            started = true;
         }
         refreshTime();
+        return started;
     }
 
     /**

@@ -109,15 +109,36 @@ stdin ─▶ BoardController ─▶ EventDispatcher ─▶ EventEngine ─▶ Ga
     GUI - runs the exact same gates as `requestMove` without starting one).
   - `RealTimeArbiter` owns **all** time-based state: pieces in transit,
     resting pieces, capture scoring, and the virtual clock. This is where
-    the "Kung Fu" mechanics actually live - jump-vs-slide dodge races
-    (`isTooLateToJump` / `isDefendedByATimelyJump`), head-on collisions
-    between opposite-color slides, same-color/knight square-contention
-    (redirect to stop one cell short via `stopShortOfContestedSquare`), and
-    atomic arrival application in `update()`. Read this class in full before
-    touching any timing/capture/jump behavior - the ordering of collision
-    resolution vs. arrival vs. contention inside `update()` is load-bearing
-    and each branch has a comment explaining a specific edge case it exists
-    for.
+    the "Kung Fu" mechanics actually live - jump-vs-slide dodge races,
+    head-on collisions between opposite-color slides, same-color/knight
+    square-contention (redirect to stop one cell short via
+    `stopShortOfContestedSquare`), and atomic arrival application in
+    `update()`. Read this class in full before touching any timing/capture/
+    jump behavior - the ordering of collision resolution vs. arrival vs.
+    contention inside `update()` is load-bearing and each branch has a
+    comment explaining a specific edge case it exists for.
+    - **Jump-vs-slide dodge race**: a jump only defends if it's still
+      genuinely airborne - not yet landed - at the exact moment the
+      incoming enemy slide arrives; landing back down *onto* the attacker
+      afterward is what captures it (`isTooLateToJump` gates this at
+      request time - too late means the jump would already be over before
+      the slide gets there, so it's rejected outright with an immediate
+      capture instead of animating a pointless jump; `isProtectedByAnInProgressJump`
+      re-checks it at the attacker's actual arrival, since real time
+      advances in small increments and a jump legitimately still in the
+      air a moment ago may have already landed by the tick that matters -
+      ties go to the defender in both places). `update()` resolves every
+      arrival in one single, strictly chronological pass (ties: slides
+      before jump landings, so a jump landing at the *same* instant an
+      attacker arrives can still catch it) - an attacker landing on a
+      still-airborne defender's square doesn't capture anyone yet, it just
+      occupies the square (the defender "isn't really there"); the jump's
+      own landing (`resolveJumpLanding`) then simply reads real board state
+      to see who's standing there and captures accordingly. No cross-tick
+      bookkeeping is needed for any of this - real, persistent board state
+      already carries the answer, which is why the mechanic works
+      identically whether both arrivals fall in one `update()` call or
+      across many separate real-time ticks.
   - Tests never sleep: time is pushed forward explicitly (`advanceTime` /
     `advance`), which is what makes the real-time logic deterministically
     testable.
@@ -134,8 +155,12 @@ stdin ─▶ BoardController ─▶ EventDispatcher ─▶ EventEngine ─▶ Ga
 - **snapshot/** - immutable, render-ready description of "the board right
   now" (`GameSnapshot`, built by `SnapshotBuilder` from the live model:
   pieces + animation state, scores, move history, selection, legal-move
-  highlights). Both `BoardRenderer` (text) and `ImgRenderer` (graphical)
-  render from this, not from the model directly.
+  highlights). The record's compact constructor `List.copyOf`s every list
+  field (`pieces`, `whiteMoves`, `blackMoves`, `legalDestinations`), so the
+  "immutable" guarantee holds regardless of what a caller does with its own
+  reference afterward - `SnapshotBuilder` no longer needs to wrap anything
+  itself. Both `BoardRenderer` (text) and `ImgRenderer` (graphical) render
+  from this, not from the model directly.
 - **view/** - `BoardWindow` is the actual interactive Swing window: a
   `JPanel` repainting the latest `ImgRenderer` frame, a `Timer` feeding real
   elapsed ms into `EventEngine.waitFor` (so animation runs on its own
@@ -174,15 +199,68 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
 - **net/** - the wire protocol, compiled as regular source alongside
   everything else (no separate client/server module - this project has no
   build tool to make that split meaningful).
-  - `Protocol` - the message prefixes specific to the network layer
-    (`login`/`register` → `AUTH_OK`; then `play`/`create_room`/
-    `join_room <code>` → `WAITING`/`ROOM_CREATED <code>`/`SEAT <seat>`;
-    `ERROR <reason>` at any point). Board commands (`click row col` /
-    `jump row col`) aren't part of this - they're parsed directly by
-    `server.GameSession`, **not** by `event.EventMapper` - `EventMapper`'s
+  - `Protocol` - the message prefixes specific to the network layer.
+    Client→server commands (`login`/`register`, `play`/`create_room`/
+    `join_room <code>`, `click row col`/`jump row col`) stay space-
+    delimited. Every server→client *tagged* reply with a payload is
+    pipe-delimited (`TAG|value`, matching the CTD 26 brief's own wire
+    examples): `AUTH_OK|rating`, `ROOM_CREATED|code`,
+    `WELCOME|role=WHITE` (greeting on being seated - the CTD brief's own
+    name for this; `Seat` the Java enum is unchanged, only the wire text
+    was renamed from the old `SEAT WHITE`), `ERROR|reason` (in-game
+    rejections use a `SCREAMING_SNAKE_CASE` code - `NOT_YOUR_PIECE`,
+    `VIEWER_CANNOT_PLAY`, `MALFORMED_COMMAND`, `ILLEGAL_MOVE` - matching
+    the brief exactly; auth/room/matchmaking-timeout reasons stay free
+    text). `WAITING` (no payload) and `STATE\n<block>` (a different
+    multi-line shape, encoded by `SnapshotCodec`) are untouched. Board
+    commands aren't parsed by `event.EventMapper` - `EventMapper`'s
     `click x y` is pixel-based (see `event.InputMapper`) for the
     stdin/console protocol, a different concern from the already-resolved
-    board cell coordinates `BoardWindow`/`GameClient` deal in.
+    board cell coordinates `BoardWindow`/`GameClient` deal in; `click row
+    col`/`jump row col` are parsed directly by `server.GameSession`.
+  - **Command vs. Event** (the CTD brief's own distinction): a `click`/
+    `jump` is a *Command* - rejectable, and always answered with either
+    `COMMAND_RESULT|SUCCESS` (parsed, regardless of its effect - a mere
+    selection change and a real move both count) or `ERROR|<reason>`.
+    An *Event* is a fact that already happened, broadcast to White/Black/
+    every viewer (same audience as `STATE`, not just the sender):
+    `EVENT|MOVE_ACCEPTED|color|fromSquare|toSquare` the instant a move
+    starts, then later either `EVENT|MOVE_COMPLETED|...` (it genuinely
+    landed) or `EVENT|MOVE_INTERRUPTED|...` (redirected short by
+    `RealTimeArbiter.stopShortOfContestedSquare`, or captured mid-flight);
+    `EVENT|JUMP_ACCEPTED|color|square` / `EVENT|JUMP_COMPLETED|...`
+    similarly (a jump, once accepted, can never be interrupted - see
+    `RealTimeArbiter`: it isn't a collision/defended-jump candidate while
+    `isMoving()` is false, so there's no `JUMP_INTERRUPTED`). `GameSession`
+    derives all of this by **polling existing public `GameEngine` queries**
+    every tick (a `PendingAction` watch-list, resolved in
+    `resolvePendingActions()`) rather than adding a new hook into
+    `RealTimeArbiter` - consistent with `forceResign` being the *one*
+    deliberate exception networking made to `gameengine/`. Two documented,
+    accepted limitations of this polling approach (see the method's own
+    Javadoc): it reads "same color at the destination square", not piece
+    identity, so an unrelated same-color move landing on a captured move's
+    exact original destination on the exact same tick is misreported as
+    `COMPLETED` rather than `INTERRUPTED` (narrow - needs same-tick +
+    same-square coincidence); and a move fully blocked one cell out
+    produces `MOVE_ACCEPTED` immediately followed by `MOVE_INTERRUPTED`,
+    often within the same tick (semantically correct, not a bug).
+    `EVENT`s are *additional* to continuous `STATE` snapshots, not a
+    replacement - `STATE`'s per-tick `progress`/`PieceVisualState` fields
+    remain the only source for animation, since `view.ImgRenderer` has
+    zero client-side elapsed-time tracking of its own and duplicating
+    `RealTimeArbiter`'s timing math on the client was judged a regression,
+    not an improvement, against this project's single-source-of-truth
+    principle.
+  - This required two small, additive changes below `net/`:
+    `GameEngine.requestMove`/`requestJump` now return `boolean` (true iff
+    the action actually started - `void` before), and
+    `event.ClickSelector.handleClick` now returns a `Result(Position
+    selection, Outcome outcome)` instead of a bare `Position` (`Outcome` is
+    `NO_MOVE_ATTEMPTED`/`MOVE_ACCEPTED`/`MOVE_REJECTED`) so a caller that
+    cares (`GameSession`) can tell a real move attempt from a mere select/
+    deselect/reselect - `EventEngine`'s local-play call site just reads
+    `.selection()` and ignores the rest, unchanged behavior.
   - `Seat` - `WHITE`/`BLACK`/`VIEWER`. Replaces raw `Piece.Color` as "what a
     connection was assigned" wherever a spectator is possible, since a
     viewer has no color (`Seat.toColor()` throws for `VIEWER` - callers
@@ -222,10 +300,26 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
   - `Lobby` - the "tournament manager" (opens rooms, matches players by
     ELO, routes connections to the right `GameSession`) - a room map
     (6-char generated code → `GameSession`), a `connection → GameSession`
-    map (for `onClose` lookups), and a matchmaking queue. `play(...)` scans
-    the queue for anyone within ±100 ELO; if found, both are seated into a
-    fresh session immediately (no timeout - per this stage's explicit
-    scope, an unmatched player just stays queued indefinitely).
+    map (for `onClose` lookups), a `username → GameSession` map (for
+    reconnect, below), and a matchmaking queue. `play(...)` scans the queue
+    for anyone within ±100 ELO; if found, both are seated into a fresh
+    session immediately. An unmatched player is removed from the queue and
+    sent an explicit `ERROR` after a configurable timeout (default 60s,
+    matching the CTD brief's "waits up to a minute") rather than queuing
+    forever - each `Waiting` entry owns its own scheduled timeout task,
+    cancelled the moment it's matched or explicitly cancelled
+    (`cancelQueued`).
+  - **Reconnect**: `Lobby.tryReconnect(connection, username)` is called by
+    `KungFuChessServer` right after every successful login/register,
+    *before* waiting for a lobby command. If `username` was seated
+    (White/Black - never a spectator) in a session it was since
+    disconnected from, `GameSession.reconnect(...)` restores that exact
+    seat (cancelling the pending auto-resign task) and re-greets the
+    connection (`SEAT` + a fresh `STATE`) - silently, with no new protocol
+    message of its own. `net.LobbyDialog.chooseAndWait` checks
+    `client.getAssignedSeat() != null` at the very top and returns
+    immediately if so, so a reconnected player is never asked to pick
+    Quick Play/Room again for a game they're already back in.
   - `GameSession.join(...)` does its own greeting (`SEAT` + that
     connection's snapshot) rather than leaving it to the caller - and, for
     the first (White) seat, deliberately **doesn't** greet at all: with no
@@ -254,8 +348,13 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     selection, or null for a spectator>)` - a player only ever sees their
     own selection highlight and legal-move markers; a `VIEWER` (tracked in a
     `CopyOnWriteArrayList`, unlimited) sees the live board but never any
-    selection, and a `VIEWER`'s `click`/`jump` is silently ignored
-    (`handleCommand` checks `seat.isPlayer()` first).
+    selection. `handleCommand` follows the CTD brief's own pipeline - parse
+    → identity → role → validation → publish (see the Command vs. Event
+    section above for the exact wire format and every rejection reason,
+    including the network-specific `VIEWER_CANNOT_PLAY`/`NOT_YOUR_PIECE`
+    and the general `MALFORMED_COMMAND`/`ILLEGAL_MOVE`). A snapshot is
+    only broadcast once an action was actually taken, not after a rejected
+    one.
   - A `ScheduledExecutorService` field (shared by the tick loop and the
     disconnect timer below) ticks every 16ms once both seats are filled
     (`engine.advanceTime(16)` - the same call `BoardWindow`'s local Swing
@@ -264,12 +363,15 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     command.
   - **Disconnect handling**: `handleDisconnect(connection)` vacates that
     seat and, if it was a real seated player (not a spectator) in an
-    already-two-player game, schedules a **one-shot** 20s task that calls
-    `engine.forceResign(thatColor)` - unconditionally; no reconnection
-    support in this stage, and `forceResign` is idempotent so it's harmless
-    if the game already ended some other way in the meantime. There is
-    deliberately **no visible countdown** anywhere (explicit user
-    instruction) - purely functional.
+    already-two-player game, schedules a **one-shot** forfeit task (default
+    20s, configurable via a constructor param so tests don't need to wait
+    for real) that calls `engine.forceResign(thatColor)`; `forceResign` is
+    idempotent so it's harmless if the game already ended some other way in
+    the meantime. If the same username reconnects first (see `Lobby`'s
+    reconnect above), `GameSession.reconnect` cancels that pending
+    `ScheduledFuture` and restores the seat instead - the forfeit never
+    fires. There is deliberately **no visible countdown** anywhere
+    (explicit user instruction) - purely functional.
   - **Concurrency**: `GameEngine`/`RealTimeArbiter` are plain,
     non-thread-safe classes by design (every other entry point drives them
     from one thread). Because Java-WebSocket dispatches connection
@@ -284,7 +386,20 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     (`applyRatingChangeIfGameJustEnded`, guarded by a `ratingApplied` flag)
     via `server.auth.EloCalculator`, persisted through
     `UserRepository.updateRating`.
-  - **server/auth/** - `UserRepository` (SQLite via `sqlite-jdbc`,
+  - **server/auth/** - `AuthCommandParser` is the one place that knows the
+    raw `"login/register <username> <password>"` wire text shape (mirrors
+    `parsing.BoardMapper`/`PieceMapper` being kept separate from the engine
+    that consumes their output) - `parse(message)` returns a `ParsedCommand`
+    (mode + username + password) or `null` if malformed; it has no
+    dependency on `UserRepository` or `AuthController`. `AuthController` is
+    the controller for the login/register step: calls the parser, then
+    calls into `UserRepository` (the service that owns account
+    logic/persistence) to carry it out, returning an `Outcome` (malformed,
+    or a `UserRepository.AuthResult`) for `KungFuChessServer.handleAuth` to
+    translate into a wire reply (`AUTH_OK`/`ERROR` + closing the
+    connection) - kept separate so this orchestration/logging isn't mixed
+    into WebSocket connection bookkeeping, and `UserRepository` never has to
+    see raw wire text at all. `UserRepository` (SQLite via `sqlite-jdbc`,
     `CREATE TABLE IF NOT EXISTS` on construction, one connection per call -
     no pooling, there are at most two players per game) owns accounts:
     `register`/`authenticate` (returning an `AuthResult` with either a

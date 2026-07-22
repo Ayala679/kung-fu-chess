@@ -45,7 +45,7 @@ class GameEngineTest {
         grid[4][4] = rook;
         GameEngine engine = engineWith(grid);
 
-        engine.requestMove(new Position(4, 4), new Position(4, 0));
+        assertTrue(engine.requestMove(new Position(4, 4), new Position(4, 0)));
         engine.advanceTime(100000);
 
         assertNull(engine.pieceAt(4, 4));
@@ -70,7 +70,7 @@ class GameEngineTest {
         grid[4][4] = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         GameEngine engine = engineWith(grid);
 
-        engine.requestMove(new Position(4, 4), new Position(5, 5));
+        assertFalse(engine.requestMove(new Position(4, 4), new Position(5, 5)));
         engine.advanceTime(100000);
 
         assertNotNull(engine.pieceAt(4, 4));
@@ -145,8 +145,12 @@ class GameEngineTest {
     }
 
     @Test void testReactiveJumpWithEnoughTimeLeftSucceeds() {
-        // Real-time race: a reactive jump (started after the enemy) still wins
-        // if it FINISHES before the enemy's slide arrives.
+        // Real-time race: a successful dodge now requires the jump to still
+        // be genuinely airborne (not yet landed) at the moment the enemy
+        // slide actually arrives - landing back down onto it afterward is
+        // what captures it. Waiting until the attack is within JUMP_DURATION
+        // of arriving (but reacting well before the very last instant)
+        // still leaves real room to succeed.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -154,9 +158,9 @@ class GameEngineTest {
         grid[0][5] = knight;
         GameEngine engine = engineWith(grid);
 
-        engine.requestMove(new Position(0, 0), new Position(0, 5)); // 5 cells -> 3335ms
-        engine.advanceTime(1);                                      // rook underway 1ms
-        engine.requestJump(0, 5);                                   // knight reacts, plenty of slack
+        engine.requestMove(new Position(0, 0), new Position(0, 5)); // 5 cells -> 5000ms
+        engine.advanceTime(4400);                                   // 600ms left - within JUMP_DURATION (700ms)
+        assertTrue(engine.requestJump(0, 5));                       // knight reacts - still airborne when the rook arrives
         engine.advanceTime(100000);
 
         assertEquals(knight, engine.pieceAt(0, 5));
@@ -164,19 +168,22 @@ class GameEngineTest {
     }
 
     @Test void testReactiveJumpAgainstAnAdjacentAttackerCanStillSucceed() {
-        // An adjacent (1-cell) attack takes MOVE_DURATION_PER_CELL (667ms);
-        // JUMP_DURATION (333ms) is deliberately shorter, so even a reactive
-        // jump against the single most common capture shape in the game has
-        // real room to succeed - not just an exact-tie instant reaction.
+        // An adjacent (1-cell) attack takes MOVE_DURATION_PER_CELL (1000ms).
+        // JUMP_DURATION (700ms) is shorter, so reacting the instant the
+        // attack starts would land back down long before it arrives - too
+        // early to matter (see testReactiveJumpTooEarlyDies for that mirror
+        // image) - but reacting once the attack is within JUMP_DURATION of
+        // arriving still leaves real room to succeed.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
         grid[0][0] = rook;
-        grid[0][1] = knight; // adjacent - 1 cell -> 667ms slide, comfortably more than JUMP_DURATION
+        grid[0][1] = knight; // adjacent - 1 cell -> 1000ms slide
         GameEngine engine = engineWith(grid);
 
         engine.requestMove(new Position(0, 0), new Position(0, 1)); // rook attacks
-        engine.requestJump(0, 1);                                   // knight reacts instantly
+        engine.advanceTime(400);                                    // 600ms left - within JUMP_DURATION (700ms)
+        assertTrue(engine.requestJump(0, 1));                       // knight reacts with enough of the attack's clock left
         engine.advanceTime(100000);
 
         assertEquals(knight, engine.pieceAt(0, 1)); // knight survives...
@@ -186,12 +193,10 @@ class GameEngineTest {
     @Test void testReactiveJumpStillSucceedsWithRealisticIncrementalTicking() {
         // Regression: BoardWindow's Swing Timer and server.GameSession's
         // ticker both advance virtual time in ~16ms steps, never in one huge
-        // jump like advanceTime(100000) above. A jump that finishes well
-        // before the attacker arrives used to stop counting as a defense the
-        // moment ITS OWN tick resolved it - long before the attacker's own,
-        // separate, later tick ever checked - so the exact scenario just
-        // above (jump defends an adjacent attack) silently never worked in
-        // real play, only in this test file's single-big-advanceTime style.
+        // jump like advanceTime(100000) above - exercises the exact same
+        // scenario as the previous test, ticked incrementally, to guard
+        // against any timing logic that only happens to work when both
+        // arrivals are swept into a single advanceTime() call.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -200,8 +205,11 @@ class GameEngineTest {
         GameEngine engine = engineWith(grid);
 
         engine.requestMove(new Position(0, 0), new Position(0, 1));
-        engine.requestJump(0, 1);
-        for (int i = 0; i < 150; i++) { // 150 * 16ms = 2400ms of realistic, incremental ticking
+        for (int i = 0; i < 25; i++) { // 25 * 16ms = 400ms - 600ms left, within JUMP_DURATION
+            engine.advanceTime(16);
+        }
+        assertTrue(engine.requestJump(0, 1));
+        for (int i = 0; i < 150; i++) { // 150 * 16ms = 2400ms more of realistic, incremental ticking
             engine.advanceTime(16);
         }
 
@@ -209,7 +217,12 @@ class GameEngineTest {
         assertNull(engine.pieceAt(0, 0));
     }
 
-    @Test void testReactiveJumpTooCloseToArrivalDies() {
+    @Test void testReactiveJumpTooEarlyDies() {
+        // Reacting well before the attack is anywhere near arriving means
+        // the jump finishes and lands back down long before the attacker
+        // gets there - by then it's just an ordinary, undefended piece,
+        // captured normally once the (still slowly approaching) attacker
+        // finally arrives.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -218,15 +231,19 @@ class GameEngineTest {
         GameEngine engine = engineWith(grid);
 
         engine.requestMove(new Position(0, 0), new Position(0, 7)); // 7 cells -> 7000ms
-        engine.advanceTime(6700);                                    // only 300ms left, jump needs 500ms
-        engine.requestJump(0, 7);
+        engine.advanceTime(100);                                     // 6900ms left - way more than JUMP_DURATION (700ms)
+        assertFalse(engine.requestJump(0, 7));                       // too early - the jump would already be over long before the attack arrives
         engine.advanceTime(100000);
 
-        // too late to dodge: the rook arrives and takes the square: the knight dies
+        // too early to matter: the rook arrives and takes the square: the knight dies
         assertEquals(rook, engine.pieceAt(0, 7));
     }
 
-    @Test void testPreemptiveJumpDefeatsALaterEnemySlide() {
+    @Test void testPreemptiveJumpDoesNotDefendAMuchLaterEnemySlide() {
+        // A jump thrown before any attack even exists can't stay protective
+        // forever - once it lands, the piece is an ordinary occupant again,
+        // vulnerable normally to whatever arrives later, no matter how much
+        // earlier it happened to jump.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -234,12 +251,12 @@ class GameEngineTest {
         grid[0][3] = knight;
         GameEngine engine = engineWith(grid);
 
-        engine.requestJump(0, 3); // knight defends first
+        engine.requestJump(0, 3); // knight jumps with no threat in sight
         engine.advanceTime(10);
-        engine.requestMove(new Position(0, 0), new Position(0, 3)); // rook attacks after
+        engine.requestMove(new Position(0, 0), new Position(0, 3)); // rook attacks afterward
         engine.advanceTime(100000);
 
-        assertEquals(knight, engine.pieceAt(0, 3));
+        assertEquals(rook, engine.pieceAt(0, 3));
         assertNull(engine.pieceAt(0, 0));
     }
 

@@ -21,7 +21,7 @@ public class EventEngine implements GameClient {
     }
 
     public void handleClick(int row, int col) {
-        selection = ClickSelector.handleClick(engine, selection, row, col, null);
+        selection = ClickSelector.handleClick(engine, selection, row, col, null).selection();
     }
 
     public void handleJump(int row, int col) {

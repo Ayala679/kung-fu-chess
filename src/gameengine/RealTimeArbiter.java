@@ -21,9 +21,7 @@ import model.RestingPiece;
  *
  * It holds the active moves, advances the simulated clock, decides when a move
  * arrives, and applies the board update atomically on arrival. When a king is
- * captured it reports it back through the shared GameState. {@code
- * jumpDefenses} is the one piece of state that outlives a single {@link
- * #update()} call on purpose - see its own doc.
+ * captured it reports it back through the shared GameState.
  *
  * All reading and advancing of virtual time happens here - no other class
  * touches the clock. Tests never sleep; they push time forward via {@link
@@ -34,34 +32,8 @@ public class RealTimeArbiter {
     private final GameState gameState;
     private final List<MovingPiece> activeMoves = new ArrayList<>();
     private final List<RestingPiece> restingPieces = new ArrayList<>();
-    private final Map<Position, JumpDefense> jumpDefenses = new HashMap<>();
     private int whiteScore = 0;
     private int blackScore = 0;
-
-    /**
-     * Proof that a jump completed at {@code square} at {@code completionTime} -
-     * kept independently of {@code activeMoves}/{@code restingPieces} so a
-     * jump that genuinely finished in time still defends the square on the
-     * attacker's real, later arrival, no matter how many ticks have passed in
-     * between (see {@link #isDefendedByATimelyJump} for why checking {@code
-     * activeMoves} alone isn't enough). Only counts for a limited grace
-     * period afterward, though - {@code piece.getShortRestDuration()} past
-     * {@code completionTime} - so a piece that jumped far too early, well
-     * before any attacker was even close, doesn't stay invincible forever;
-     * see {@link #isDefendedByATimelyJump} for the exact bound. Superseded
-     * (removed) even sooner than that the instant that square's occupant
-     * does anything else: leaves, jumps again, or is replaced by a
-     * capture/arrival - see every {@code jumpDefenses.remove(...)} call site.
-     */
-    private static final class JumpDefense {
-        final Piece piece;
-        final long completionTime;
-
-        JumpDefense(Piece piece, long completionTime) {
-            this.piece = piece;
-            this.completionTime = completionTime;
-        }
-    }
 
     public RealTimeArbiter(Board board, GameState gameState) {
         this.board = board;
@@ -102,12 +74,10 @@ public class RealTimeArbiter {
     }
 
     public void startMove(Piece piece, Position from, Position to, long duration) {
-        jumpDefenses.remove(from); // committing to a new errand supersedes any old completed-jump proof for this square
         activeMoves.add(new MovingPiece(piece, from, to, duration, gameState.getCurrentTime()));
     }
 
     public void startJump(Piece piece, Position pos, long duration) {
-        jumpDefenses.remove(pos); // a fresh jump supersedes any earlier one - a new proof lands if/when this one completes
         activeMoves.add(new MovingPiece(piece, pos, pos, duration, gameState.getCurrentTime()));
     }
 
@@ -147,7 +117,6 @@ public class RealTimeArbiter {
         Position pos = new Position(row, col);
         board.setCell(row, col, null);
         clearRestAt(pos);
-        jumpDefenses.remove(pos);
         recordCapture(piece);
     }
 
@@ -165,14 +134,20 @@ public class RealTimeArbiter {
     }
 
     /**
-     * Is it too late to jump out of this cell? A real-time race: if a jump
-     * started right now would finish at or before the incoming enemy slide
-     * arrives, the dodge succeeds - otherwise it's too late and the piece
-     * dies. A tie must side with the jump here, matching the identical tie
-     * rule in the mid-air capture resolution below ("ties go to the
-     * defender") - otherwise a same-duration race (e.g. any adjacent capture,
-     * where a 1-cell slide and JUMP_DURATION are equal) would always kill the
-     * defender before its jump could even start, regardless of reaction time.
+     * Is it too late to jump out of this cell? A jump only helps if it's
+     * still genuinely in the air - not yet landed - at the moment the
+     * incoming enemy slide actually arrives: landing back down onto the
+     * attacker afterward is what captures it (see {@link
+     * #resolveJumpLanding}). So if a jump started right now would already
+     * be over (landed) before that slide gets here, jumping wouldn't help
+     * at all - the piece would just be sitting there again, normally, when
+     * the attack lands - so it's captured immediately instead of animating
+     * a pointless jump. A tie (the jump would land at exactly the
+     * attacker's own arrival) still counts as "in time" - ties go to the
+     * defender, matching {@link #isProtectedByAnInProgressJump}; otherwise a
+     * same-duration race (e.g. any adjacent capture, where a 1-cell slide
+     * and JUMP_DURATION could tie) would always kill the defender,
+     * regardless of reaction time.
      */
     public boolean isTooLateToJump(int row, int col, Piece piece) {
         long jumpFinish = gameState.getCurrentTime() + GameConfig.JUMP_DURATION;
@@ -181,7 +156,7 @@ public class RealTimeArbiter {
                 Position to = active.getTo();
                 if (to.getRow() == row && to.getCol() == col
                         && active.getPiece().getColor() != piece.getColor()
-                        && jumpFinish > active.getArrivalTime()) {
+                        && jumpFinish < active.getArrivalTime()) {
                     return true;
                 }
             }
@@ -190,37 +165,27 @@ public class RealTimeArbiter {
     }
 
     /**
-     * Is {@code square} currently defended, against an attacker of
-     * {@code attackerColor} scheduled to arrive at {@code attackerArrivalTime},
-     * by an opposite-color in-place jump that finished at or before that
-     * arrival? Checks both a jump still genuinely airborne ({@code
-     * activeMoves}) and one that already completed within its grace period
-     * ({@code jumpDefenses}) - see that field's own doc for why the second
-     * check is needed: real play advances time in small (~16ms) increments,
-     * and JUMP_DURATION is always shorter than any slide it might be
-     * racing, so the jump has almost always already resolved out of {@code
-     * activeMoves} by the time a slower attacker's own arrival is even
-     * processed. Without the second check, a jump that genuinely finished
-     * in time would stop counting the moment its own tick happened to run -
-     * which is a real-world certainty, not an edge case, and defeats the
-     * entire mechanic outside of tests that jump virtual time forward in
-     * one huge step. The grace period itself keeps this from becoming
-     * permanent immunity: a jump thrown far too early, long before any
-     * attacker was actually close, must not still protect once its own
-     * short-rest window has elapsed.
+     * Is {@code square} currently defended by an opposite-color in-place
+     * jump that's still genuinely airborne - scheduled to land at or after
+     * {@code attackerArrivalTime}? Ties go to the defender: a jump landing
+     * at exactly the attacker's own arrival still counts as "still up
+     * there". If true, the attacker arriving here doesn't capture anyone -
+     * the defender isn't really "there" to be captured mid-jump - it just
+     * occupies the square as if it were empty; the real resolution happens
+     * later, at the jump's own landing (see {@link #resolveJumpLanding}),
+     * which simply checks who's actually standing on the square by then -
+     * no separate cross-tick bookkeeping needed, real board state already
+     * carries the answer.
      */
-    private boolean isDefendedByATimelyJump(Position square, Piece.Color attackerColor, long attackerArrivalTime) {
+    private boolean isProtectedByAnInProgressJump(Position square, Piece.Color attackerColor, long attackerArrivalTime) {
         for (MovingPiece jump : activeMoves) {
             if (!jump.isMoving() && jump.getTo().equals(square)
                     && jump.getPiece().getColor() != attackerColor
-                    && jump.getArrivalTime() <= attackerArrivalTime) {
+                    && jump.getArrivalTime() >= attackerArrivalTime) {
                 return true;
             }
         }
-        JumpDefense defense = jumpDefenses.get(square);
-        if (defense == null || defense.piece.getColor() == attackerColor) return false;
-        long graceDeadline = defense.completionTime + defense.piece.getShortRestDuration();
-        return defense.completionTime <= attackerArrivalTime && attackerArrivalTime <= graceDeadline;
+        return false;
     }
 
     /**
@@ -294,7 +259,12 @@ public class RealTimeArbiter {
                 arrived.add(mp);
             }
         }
-        arrived.sort(Comparator.comparingLong(MovingPiece::getArrivalTime));
+        // Ties (equal arrival time) resolve slides before jump landings, so a
+        // jump landing at the exact same instant an attacker arrives can
+        // still "catch" that attacker (see resolveJumpLanding) instead of
+        // the jump settling first and the attacker simply overwriting it.
+        arrived.sort(Comparator.comparingLong(MovingPiece::getArrivalTime)
+                .thenComparing(mp -> !mp.isMoving()));
 
         // Cells whose occupant already has an active outgoing move of its own -
         // whether that move arrives later in this same batch, or is still
@@ -310,25 +280,24 @@ public class RealTimeArbiter {
 
         Map<Position, Piece> claimed = new HashMap<>();
 
+        // Resolved strictly in arrival-time order (ties: slides before jump
+        // landings, per the sort above) - this single chronological pass is
+        // what makes both directions of the jump-defense race correct: a
+        // jump landing genuinely earlier than an attacker is resolved first
+        // (see resolveJumpLanding - it becomes an ordinary occupant, capturable
+        // normally when the attacker's own turn in this sequence comes); an
+        // attacker arriving at or before a still-airborne jump is resolved
+        // first instead, occupying the square without capturing anyone (the
+        // defender isn't "really there" mid-jump) - the jump then finds it
+        // there when ITS turn comes and captures it on landing.
         for (MovingPiece mp : arrived) {
             if (!mp.isMoving()) {
-                addRest(mp.getPiece(), mp.getTo(), currentTime, true); // completed jump - short rest
-                jumpDefenses.put(mp.getTo(), new JumpDefense(mp.getPiece(), mp.getArrivalTime()));
+                resolveJumpLanding(mp, currentTime);
                 continue;
             }
             Position to = mp.getTo();
 
-            // A defender that jumped in place and finished (or is still mid-
-            // jump but scheduled to finish) at or before THIS attacker's own
-            // arrival, and hasn't yet fully returned to idle since, defeats
-            // the attacker right here instead of being captured - resolved
-            // only now, at the attacker's real arrival, not the instant both
-            // moves happened to coexist. Ties go to the defender: it was
-            // already braced first.
-            if (isDefendedByATimelyJump(to, mp.getPiece().getColor(), mp.getArrivalTime())) {
-                capture(mp.getFrom().getRow(), mp.getFrom().getCol(), mp.getPiece());
-                continue;
-            }
+            boolean protectedByJump = isProtectedByAnInProgressJump(to, mp.getPiece().getColor(), mp.getArrivalTime());
 
             Piece claimant = claimed.get(to);
             boolean sameColorContest = claimant != null && claimant.getColor() == mp.getPiece().getColor();
@@ -348,8 +317,9 @@ public class RealTimeArbiter {
                 continue;
             }
 
-            claimed.put(to, applyArrival(mp, to, currentTime, departingActive.contains(to)));
+            claimed.put(to, applyArrival(mp, to, currentTime, departingActive.contains(to), protectedByJump));
         }
+
         activeMoves.removeAll(arrived);
 
         if (!claimed.isEmpty()) {
@@ -389,17 +359,23 @@ public class RealTimeArbiter {
      * means the board still shows someone at {@code to} only because their own
      * departure hasn't been applied yet - they already started leaving before
      * this arrival happened (whether their own move resolves in this same
-     * batch or only much later), so it's not a real capture.
+     * batch or only much later), so it's not a real capture. {@code
+     * protectedByInProgressJump} means whoever's shown at {@code to} is
+     * actually a defender still mid-jump - not really "there" to be
+     * captured - so this arrival just occupies the square without scoring
+     * a capture; see {@link #resolveJumpLanding} for how that gets resolved
+     * once the jump itself lands.
      *
      * The origin is only cleared if it still holds the piece that's leaving -
      * if a different arrival, processed earlier in this same batch, already
      * landed there, clearing it would wipe out that legitimate arrival instead
      * of the piece that actually departed.
      */
-    private Piece applyArrival(MovingPiece mp, Position to, long currentTime, boolean destinationHasAnActiveDeparture) {
+    private Piece applyArrival(MovingPiece mp, Position to, long currentTime, boolean destinationHasAnActiveDeparture,
+                                boolean protectedByInProgressJump) {
         Piece finalPiece = mp.getPiece().promotedAt(to.getRow(), board.getHeight());
         Piece destination = board.getCell(to);
-        if (destination != null && !destinationHasAnActiveDeparture) {
+        if (destination != null && !destinationHasAnActiveDeparture && !protectedByInProgressJump) {
             recordCapture(destination);
         }
 
@@ -412,18 +388,34 @@ public class RealTimeArbiter {
     }
 
     /**
+     * A jump lands: whoever is actually standing on the square by now (real
+     * board state - no separate memory needed) decides the outcome. Nobody,
+     * or the jumper's own piece (the square it never really left) - a
+     * normal, uneventful landing. An enemy piece - it arrived earlier in
+     * this same {@link #update()} call's chronological resolution order,
+     * while this piece was still airborne (see {@link
+     * #isProtectedByAnInProgressJump}) - landing captures it right here,
+     * before the jumper takes the square back and starts its own rest.
+     */
+    private void resolveJumpLanding(MovingPiece jump, long currentTime) {
+        Position at = jump.getTo();
+        Piece jumper = jump.getPiece();
+        Piece occupant = board.getCell(at);
+        if (occupant != null && occupant.getColor() != jumper.getColor()) {
+            capture(at.getRow(), at.getCol(), occupant);
+        }
+        board.setCell(at.getRow(), at.getCol(), jumper);
+        addRest(jumper, at, currentTime, true);
+    }
+
+    /**
      * A piece that just finished a move/jump can't act again until its rest
      * duration elapses. Clears any stale entry for this square first - whoever
      * was resting there before (now captured or replaced) is gone, and must not
-     * keep blocking whoever occupies the square now. A normal move landing
-     * here (fromJump=false) also starts a fresh occupancy episode, so any
-     * earlier jump-defense proof for this square is cleared too - the
-     * jump-completion branch in {@link #update()} sets a fresh one itself,
-     * right after calling this with fromJump=true.
+     * keep blocking whoever occupies the square now.
      */
     private void addRest(Piece piece, Position pos, long currentTime, boolean fromJump) {
         clearRestAt(pos);
-        if (!fromJump) jumpDefenses.remove(pos);
         long duration = fromJump ? piece.getShortRestDuration() : piece.getLongRestDuration();
         restingPieces.add(new RestingPiece(piece, pos, currentTime + duration, fromJump));
     }

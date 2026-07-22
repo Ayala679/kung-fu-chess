@@ -406,7 +406,7 @@ class RealTimeArbiterTest {
         arbiter.startJump(knight, new Position(0, 3), 500); // defender jumps right away, completes at t=500
         arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 2000); // attacker still far off, arrives t=2000
 
-        state.advanceTime(900); // well after the jump itself (and its short-rest cooldown) have finished
+        state.advanceTime(900); // the jump has already resolved (landed, and finished its own rest) by now
         arbiter.update();
 
         assertTrue(arbiter.getActiveMoves().stream().anyMatch(mp -> mp.getPiece() == rook)); // still on its way, not destroyed early
@@ -415,20 +415,20 @@ class RealTimeArbiterTest {
         state.advanceTime(1100); // now at t=2000, the rook's own arrival
         arbiter.update();
 
-        // The knight's jump-defense grace period (completion + its own short-rest
-        // duration) is long over by t=2000 - a jump thrown this early doesn't grant
-        // permanent immunity, so the rook wins the race after all.
+        // The knight's jump landed (and was removed from activeMoves) back
+        // at t=500, long before the rook's own arrival at t=2000 - jumping
+        // this early doesn't grant any protection against an attack that's
+        // still seconds away, so the rook wins the race after all.
         assertEquals(rook, board.getCell(0, 3));
         assertNull(board.getCell(0, 0));
     }
 
-    @Test void testJumpDefenseStillProtectsDuringTheRestThatFollowsIt() {
-        // "Jumping" and "resting after a jump" are different states, but both
-        // still count as proof the jump finished in time: an attacker whose
-        // own arrival is at or after the jump's completion loses the race,
-        // regardless of whether the defender has since started resting -
-        // see RealTimeArbiterTest.testJumpDefenseIsGoneAfterTheDefenderMovesAway
-        // for what actually *does* end the protection.
+    @Test void testJumpDefenseDoesNotOutlastTheJumpItself() {
+        // A jump that lands well before an attacker arrives doesn't protect
+        // "into the rest that follows it" - the whole grace-period-into-rest
+        // idea is gone. Success now depends only on whether the jump is
+        // still genuinely airborne (not yet landed) at the attacker's own
+        // arrival - see isProtectedByAnInProgressJump.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.BLACK, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.WHITE, Piece.Type.N);
@@ -447,17 +447,18 @@ class RealTimeArbiterTest {
         state.advanceTime(200); // now t=700 - knight is merely resting (not jumping) when the rook arrives
         arbiter.update();
 
-        assertEquals(knight, board.getCell(0, 3)); // the jump was still in time - the rook is captured instead
+        assertEquals(rook, board.getCell(0, 3)); // landed at t=500, long done by t=700 - an ordinary, undefended capture
         assertNull(board.getCell(0, 0));
     }
 
-    @Test void testJumpDefenseExpiresOnceTheDefenderJumpsAgain() {
-        // A jump-defense proof isn't permanent - it's superseded the instant
-        // that square's occupant does something new. Here, the knight's
-        // first jump would (on a naive timestamp-only check) still "cover"
-        // an attacker arriving well after it - but the knight jumped again
-        // in between, and that second jump hasn't finished yet when the
-        // attacker shows up, so the old proof must not still count.
+    @Test void testStillAirborneJumpDefendsAcrossSeparateTicksToo() {
+        // The mirror image of the previous test: if the jump is still
+        // genuinely airborne (not yet landed) when the attacker's own
+        // arrival is processed - even in a separate, later update() call,
+        // not the same batch - it still defends. No cross-tick bookkeeping
+        // is needed for this: the jump's MovingPiece entry simply hasn't
+        // been resolved yet, so it's still sitting right there in
+        // activeMoves when the attacker's tick comes around.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.BLACK, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.WHITE, Piece.Type.N);
@@ -467,24 +468,27 @@ class RealTimeArbiterTest {
         GameState state = new GameState();
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
-        arbiter.startJump(knight, new Position(0, 3), 100); // first jump, completes t=100
-        state.advanceTime(100);
-        arbiter.update(); // proof recorded: completed at t=100
+        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 700); // attacker arrives at t=700
+        arbiter.startJump(knight, new Position(0, 3), 1000); // defender's jump finishes later, at t=1000 - still airborne at t=700
 
-        // Both started at t=100: knight jumps again (clearing the old proof;
-        // completes t=1100), rook attacks (arrives t=600 - after the OLD
-        // proof's t=100, but mid-flight of the still-unfinished new jump).
-        arbiter.startJump(knight, new Position(0, 3), 1000);
-        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 500);
+        state.advanceTime(700);
+        arbiter.update(); // rook "arrives" but the knight isn't really there to capture - it's still mid-jump
 
-        state.advanceTime(500); // t=600: rook arrives; the second jump is still airborne, not yet proof of anything
+        assertEquals(rook, board.getCell(0, 3)); // occupies the square normally for now - nobody captured yet
+        assertTrue(arbiter.getActiveMoves().stream().anyMatch(mp -> mp.getPiece() == knight)); // the jump is still in progress
+
+        state.advanceTime(300); // now t=1000 - the jump lands, in a separate, later update() call
         arbiter.update();
 
-        assertEquals(rook, board.getCell(0, 3)); // the stale t=100 proof must not have covered this
+        assertEquals(knight, board.getCell(0, 3)); // the knight lands on the rook that moved in and captures it
         assertNull(board.getCell(0, 0));
     }
 
-    @Test void testJumpDefenseIsGoneAfterTheDefenderMovesAway() {
+    @Test void testJumpProtectionEndsTheMomentTheDefenderMovesAwayInstead() {
+        // If the piece moves away (a normal slide, not a jump) instead of
+        // staying to face the incoming attacker, there's no jump in
+        // progress at all - the attacker simply captures whatever's left
+        // behind, exactly as it would for any other piece.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.BLACK, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.WHITE, Piece.Type.N);
@@ -495,15 +499,8 @@ class RealTimeArbiterTest {
         GameState state = new GameState();
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
-        arbiter.startJump(knight, new Position(0, 3), 500); // knight jumps, completes t=500
-        state.advanceTime(500);
-        arbiter.update();
-
-        // The knight moves away from (0,3) entirely - its old jump-defense
-        // proof for that square must go with it, not linger for whoever (or
-        // nothing) is left behind.
-        arbiter.startMove(knight, new Position(0, 3), new Position(1, 3), 667);
-        state.advanceTime(667);
+        arbiter.startMove(knight, new Position(0, 3), new Position(1, 3), 1000); // knight flees instead of jumping
+        state.advanceTime(1000);
         arbiter.update();
 
         board.setCell(0, 3, filler); // some unrelated pawn now happens to sit where the knight used to be
@@ -512,7 +509,7 @@ class RealTimeArbiterTest {
         arbiter.update();
 
         assertEquals(knight, board.getCell(1, 3)); // the knight itself was never attacked - still safe where it moved to
-        assertEquals(rook, board.getCell(0, 3)); // ...but the stale proof did not save the filler pawn left behind
+        assertEquals(rook, board.getCell(0, 3)); // the filler pawn left behind is captured normally
     }
 
     @Test void testMidAirCaptureOfKingEndsGame() {
@@ -525,15 +522,25 @@ class RealTimeArbiterTest {
         GameState state = new GameState();
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
-        arbiter.startJump(knight, new Position(0, 3), 500);
-        arbiter.startMove(king, new Position(0, 0), new Position(0, 3), 1000);
+        arbiter.startMove(king, new Position(0, 0), new Position(0, 3), 1000); // king attacks, arrives t=1000
+        arbiter.startJump(knight, new Position(0, 3), 1500); // knight's jump is still airborne at t=1000
+
         state.advanceTime(1000);
+        arbiter.update(); // king "arrives" but the knight isn't really there yet - occupies the square for now
+
+        assertFalse(state.isGameOver());
+
+        state.advanceTime(500); // now t=1500 - the jump lands on the king that moved in
         arbiter.update();
 
         assertTrue(state.isGameOver());
     }
 
-    @Test void testIsTooLateToJumpWhenEnemySlideAlreadyUnderway() {
+    @Test void testIsTooLateToJumpWhenReactingTooEarly() {
+        // Reacting when there's still much more than JUMP_DURATION left on
+        // the incoming attack means the jump would land back down long
+        // before the attack arrives - too early to matter, so it's "too
+        // late" in the sense that jumping wouldn't help at all.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -544,7 +551,7 @@ class RealTimeArbiterTest {
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
         arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 1000);
-        state.advanceTime(800); // only 200ms left until arrival - less than JUMP_DURATION, genuinely can't make it
+        state.advanceTime(100); // 900ms left - well more than JUMP_DURATION (700ms), reacting way too early
 
         assertTrue(arbiter.isTooLateToJump(0, 3, knight));
     }
@@ -552,11 +559,7 @@ class RealTimeArbiterTest {
     @Test void testIsTooLateToJumpIsFalseOnAnExactTie() {
         // Regression: a jump that would finish at EXACTLY the same instant the
         // enemy slide arrives must not be "too late" - ties go to the
-        // defender, same as the mid-air capture resolution in update(). This
-        // matters most for the single most common capture shape: an adjacent
-        // (1-cell) slide takes exactly JUMP_DURATION too, so without this a
-        // defensive jump could never succeed against it, regardless of how
-        // fast the player reacts.
+        // defender, same as the mid-air capture resolution in update().
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -567,6 +570,25 @@ class RealTimeArbiterTest {
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
         arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), GameConfig.JUMP_DURATION);
+
+        assertFalse(arbiter.isTooLateToJump(0, 3, knight));
+    }
+
+    @Test void testIsTooLateToJumpIsFalseWhenReactingWithLittleTimeLeft() {
+        // The mirror image of the "too early" test above: reacting once the
+        // attack has JUMP_DURATION or less left on its own clock means the
+        // jump will still be airborne when it arrives - not too late.
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
+        grid[0][0] = rook;
+        grid[0][3] = knight;
+        Board board = new Board(grid);
+        GameState state = new GameState();
+        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
+
+        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 1000);
+        state.advanceTime(400); // 600ms left - within JUMP_DURATION (700ms)
 
         assertFalse(arbiter.isTooLateToJump(0, 3, knight));
     }
@@ -752,10 +774,14 @@ class RealTimeArbiterTest {
         GameState state = new GameState();
         RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
 
-        arbiter.startJump(knight, new Position(0, 3), 500);
-        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 1000);
+        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 1000); // rook attacks, arrives t=1000
+        arbiter.startJump(knight, new Position(0, 3), 1500); // knight's jump is still airborne at t=1000
+
         state.advanceTime(1000);
-        arbiter.update(); // rook is eaten mid-air by the knight's jump
+        arbiter.update(); // rook occupies the square for now - the knight isn't really there to capture yet
+
+        state.advanceTime(500); // now t=1500 - the knight lands on the rook that moved in
+        arbiter.update();
 
         assertEquals(5, arbiter.getScore(Piece.Color.BLACK)); // rook's material value
     }

@@ -5,11 +5,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import org.java_websocket.WebSocket;
 
 import bus.Bus;
 import logging.ActivityLog;
+import net.Protocol;
 import server.auth.UserRepository;
 
 /**
@@ -24,20 +29,39 @@ public class Lobby {
     private static final int MATCHMAKING_ELO_RANGE = 100;
     private static final String ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int ROOM_CODE_LENGTH = 6;
+    private static final long DEFAULT_MATCHMAKING_TIMEOUT_MILLIS = 60_000L;
 
     private final Bus bus;
     private final UserRepository userRepository;
     private final ActivityLog activityLog;
+    private final long matchmakingTimeoutMillis;
     private final SecureRandom random = new SecureRandom();
+    private final ScheduledExecutorService matchmakingScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "lobby-matchmaking-timeout");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final Map<String, GameSession> rooms = new ConcurrentHashMap<>();
     private final Map<WebSocket, GameSession> sessionByConnection = new ConcurrentHashMap<>();
+    private final Map<String, GameSession> sessionByUsername = new ConcurrentHashMap<>();
     private final List<Waiting> matchmakingQueue = new ArrayList<>();
 
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog) {
+        this(bus, userRepository, activityLog, DEFAULT_MATCHMAKING_TIMEOUT_MILLIS);
+    }
+
+    /**
+     * Same as the 3-arg constructor, with the "give up waiting" timeout for
+     * {@link #play} given explicitly (in milliseconds) instead of the
+     * default 60 seconds - so tests can use a short delay instead of
+     * actually waiting a minute.
+     */
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, long matchmakingTimeoutMillis) {
         this.bus = bus;
         this.userRepository = userRepository;
         this.activityLog = activityLog;
+        this.matchmakingTimeoutMillis = matchmakingTimeoutMillis;
     }
 
     public GameSession sessionOf(WebSocket connection) {
@@ -51,6 +75,7 @@ public class Lobby {
         rooms.put(code, session);
         session.join(connection, username, rating);
         sessionByConnection.put(connection, session);
+        sessionByUsername.put(username, session);
         activityLog.log("room=" + code + " created by " + username);
         return session;
     }
@@ -61,7 +86,27 @@ public class Lobby {
         if (session == null) return null;
         session.join(connection, username, rating);
         sessionByConnection.put(connection, session);
+        sessionByUsername.put(username, session);
         return session;
+    }
+
+    /**
+     * Called right after a successful login/register, before any lobby
+     * command: if {@code username} was seated (White/Black, never a
+     * spectator - see GameSession.reconnect) in a session it has since been
+     * disconnected from, restores that seat instead of making them start
+     * over. Returns false (silently - the caller proceeds to the normal
+     * play/create_room/join_room flow) if there's nothing to reconnect to.
+     */
+    public boolean tryReconnect(WebSocket connection, String username) {
+        GameSession session = sessionByUsername.get(username);
+        if (session == null) return false;
+        boolean reconnected = session.reconnect(connection, username);
+        if (reconnected) {
+            sessionByConnection.put(connection, session);
+            activityLog.log("room=" + session.getRoomCode() + " " + username + " reconnected");
+        }
+        return reconnected;
     }
 
     /**
@@ -69,15 +114,16 @@ public class Lobby {
      * returns true (GameSession.join itself greets both sides - SEAT +
      * initial snapshot - the moment the second one joins). If no one
      * waiting is close enough, this connection joins the queue and false is
-     * returned (caller sends WAITING) - per this stage's explicit scope,
-     * there's no timeout: a queued player just stays queued until a
-     * suitable opponent arrives.
+     * returned (caller sends WAITING); if no opponent arrives within
+     * {@link #matchmakingTimeoutMillis}, it's removed from the queue and
+     * sent an explicit ERROR instead of waiting forever.
      */
     public synchronized boolean play(WebSocket connection, String username, int rating) {
         for (int i = 0; i < matchmakingQueue.size(); i++) {
             Waiting candidate = matchmakingQueue.get(i);
             if (Math.abs(candidate.rating - rating) <= MATCHMAKING_ELO_RANGE) {
                 matchmakingQueue.remove(i);
+                candidate.timeoutTask.cancel(false);
 
                 String code = newRoomCode();
                 GameSession session = new GameSession(bus, code, userRepository, activityLog);
@@ -87,19 +133,38 @@ public class Lobby {
                 session.join(connection, username, rating);
                 sessionByConnection.put(candidate.connection, session);
                 sessionByConnection.put(connection, session);
+                sessionByUsername.put(candidate.username, session);
+                sessionByUsername.put(username, session);
 
                 activityLog.log("room=" + code + " quick-match: " + candidate.username + " vs " + username);
                 return true;
             }
         }
-        matchmakingQueue.add(new Waiting(connection, username, rating));
+        Waiting waiting = new Waiting(connection, username, rating);
+        waiting.timeoutTask = matchmakingScheduler.schedule(() -> handleMatchmakingTimeout(waiting),
+                matchmakingTimeoutMillis, TimeUnit.MILLISECONDS);
+        matchmakingQueue.add(waiting);
         activityLog.log(username + " (" + rating + ") queued for quick-match");
         return false;
     }
 
+    /** No opponent showed up within the timeout - drop the entry and tell the client clearly, instead of leaving them waiting forever. */
+    private synchronized void handleMatchmakingTimeout(Waiting waiting) {
+        if (!matchmakingQueue.remove(waiting)) return; // already matched (or already cancelled) in the meantime
+        activityLog.log(waiting.username + " quick-match timed out after " + matchmakingTimeoutMillis + "ms");
+        if (waiting.connection.isOpen()) {
+            waiting.connection.send(Protocol.ERROR + "|no opponent found within "
+                    + (matchmakingTimeoutMillis / 1000) + " seconds - try again");
+        }
+    }
+
     /** Removes a still-queued (not yet matched) connection - safe to call even if it was never queued. */
     public synchronized void cancelQueued(WebSocket connection) {
-        matchmakingQueue.removeIf(w -> w.connection == connection);
+        matchmakingQueue.removeIf(w -> {
+            if (w.connection != connection) return false;
+            w.timeoutTask.cancel(false);
+            return true;
+        });
     }
 
     /** A connection dropped: forget it, and let its GameSession (if any) handle the forfeit/spectator-removal. */
@@ -125,6 +190,7 @@ public class Lobby {
         final WebSocket connection;
         final String username;
         final int rating;
+        ScheduledFuture<?> timeoutTask;
 
         Waiting(WebSocket connection, String username, int rating) {
             this.connection = connection;

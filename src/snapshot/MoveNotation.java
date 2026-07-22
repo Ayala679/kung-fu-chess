@@ -18,7 +18,8 @@ public class MoveNotation {
         return typeLetter + square(to, boardHeight);
     }
 
-    private static String square(Position pos, int boardHeight) {
+    /** Algebraic square name for a board position (e.g. "e4") - public so callers outside the move-log UI (e.g. server.GameSession's network events) can reuse the same row/col-to-square formula instead of re-deriving it. */
+    public static String square(Position pos, int boardHeight) {
         char file = (char) ('a' + pos.getCol());
         int rank = boardHeight - pos.getRow();
         return "" + file + rank;

@@ -20,17 +20,18 @@ class ClickSelectorTest {
         grid[4][4] = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, null, 4, 4, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, null, 4, 4, null);
 
-        assertEquals(new Position(4, 4), selection);
+        assertEquals(new Position(4, 4), result.selection());
+        assertEquals(ClickSelector.Outcome.NO_MOVE_ATTEMPTED, result.outcome());
     }
 
     @Test void testFirstClickOnAnEmptyCellSelectsNothing() {
         GameEngine engine = engineWith(new Piece[8][8]);
 
-        Position selection = ClickSelector.handleClick(engine, null, 4, 4, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, null, 4, 4, null);
 
-        assertNull(selection);
+        assertNull(result.selection());
     }
 
     @Test void testSecondClickOnTheSameSelectedPieceCancelsTheSelection() {
@@ -38,9 +39,9 @@ class ClickSelectorTest {
         grid[4][4] = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, new Position(4, 4), 4, 4, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(4, 4), 4, 4, null);
 
-        assertNull(selection);
+        assertNull(result.selection());
     }
 
     @Test void testSecondClickOnAnotherOwnPieceReselects() {
@@ -49,9 +50,10 @@ class ClickSelectorTest {
         grid[4][0] = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, new Position(4, 4), 4, 0, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(4, 4), 4, 0, null);
 
-        assertEquals(new Position(4, 0), selection);
+        assertEquals(new Position(4, 0), result.selection());
+        assertEquals(ClickSelector.Outcome.NO_MOVE_ATTEMPTED, result.outcome());
     }
 
     @Test void testSecondClickElsewhereRequestsAMoveAndClearsTheSelection() {
@@ -60,19 +62,20 @@ class ClickSelectorTest {
         grid[4][4] = rook;
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, new Position(4, 4), 4, 0, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(4, 4), 4, 0, null);
         engine.advanceTime(100000);
 
-        assertNull(selection);
+        assertNull(result.selection());
+        assertEquals(ClickSelector.Outcome.MOVE_ACCEPTED, result.outcome());
         assertEquals(rook, engine.pieceAt(4, 0));
     }
 
     @Test void testOutOfBoundsClickCancelsAnyPendingSelection() {
         GameEngine engine = engineWith(new Piece[8][8]);
 
-        Position selection = ClickSelector.handleClick(engine, new Position(4, 4), -1, -1, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(4, 4), -1, -1, null);
 
-        assertNull(selection);
+        assertNull(result.selection());
     }
 
     @Test void testGameOverLeavesTheSelectionUntouched() {
@@ -86,9 +89,10 @@ class ClickSelectorTest {
         engine.advanceTime(100000);
         assertTrue(engine.isGameOver());
 
-        Position selection = ClickSelector.handleClick(engine, new Position(1, 1), 2, 2, null);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(1, 1), 2, 2, null);
 
-        assertEquals(new Position(1, 1), selection); // unchanged - clicks are ignored once the game is over
+        assertEquals(new Position(1, 1), result.selection()); // unchanged - clicks are ignored once the game is over
+        assertEquals(ClickSelector.Outcome.NO_MOVE_ATTEMPTED, result.outcome());
     }
 
     @Test void testRequiredColorBlocksSelectingAnOpponentPiece() {
@@ -96,9 +100,9 @@ class ClickSelectorTest {
         grid[4][4] = Piece.of(Piece.Color.BLACK, Piece.Type.R);
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, null, 4, 4, Piece.Color.WHITE);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, null, 4, 4, Piece.Color.WHITE);
 
-        assertNull(selection);
+        assertNull(result.selection());
     }
 
     @Test void testRequiredColorAllowsSelectingYourOwnPiece() {
@@ -106,9 +110,9 @@ class ClickSelectorTest {
         grid[4][4] = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, null, 4, 4, Piece.Color.WHITE);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, null, 4, 4, Piece.Color.WHITE);
 
-        assertEquals(new Position(4, 4), selection);
+        assertEquals(new Position(4, 4), result.selection());
     }
 
     @Test void testRequiredColorDoesNotBlockCapturingAnOpponentPieceOnTheSecondClick() {
@@ -122,10 +126,24 @@ class ClickSelectorTest {
         grid[4][0] = blackPawn;
         GameEngine engine = engineWith(grid);
 
-        Position selection = ClickSelector.handleClick(engine, new Position(4, 4), 4, 0, Piece.Color.WHITE);
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(4, 4), 4, 0, Piece.Color.WHITE);
         engine.advanceTime(100000);
 
-        assertNull(selection);
+        assertNull(result.selection());
+        assertEquals(ClickSelector.Outcome.MOVE_ACCEPTED, result.outcome());
         assertEquals(whiteRook, engine.pieceAt(4, 0));
+    }
+
+    @Test void testAnIllegalMoveAttemptIsReportedAsRejected() {
+        Piece[][] grid = new Piece[8][8];
+        grid[4][4] = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        GameEngine engine = engineWith(grid);
+
+        // A rook cannot move diagonally - the click still "requests" a move
+        // (it's not a reselect, since (5,5) is empty), but the engine rejects it.
+        ClickSelector.Result result = ClickSelector.handleClick(engine, new Position(4, 4), 5, 5, null);
+
+        assertNull(result.selection());
+        assertEquals(ClickSelector.Outcome.MOVE_REJECTED, result.outcome());
     }
 }

@@ -21,6 +21,12 @@ class LobbyTest {
         return new Lobby(new Bus(), userRepository, activityLog);
     }
 
+    private static Lobby newLobbyWithShortMatchmakingTimeout(Path tempDir, long timeoutSeconds) {
+        UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
+        ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
+        return new Lobby(new Bus(), userRepository, activityLog, timeoutSeconds);
+    }
+
     @Test void testPlayQueuesWhenNoOneIsWaiting(@TempDir Path tempDir) {
         Lobby lobby = newLobby(tempDir);
         FakeWebSocket alice = new FakeWebSocket();
@@ -40,8 +46,8 @@ class LobbyTest {
         boolean matched = lobby.play(bob, "bob", 1250); // within +-100
 
         assertTrue(matched);
-        assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT")));
-        assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT")));
+        assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
+        assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
         assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
     }
@@ -69,8 +75,8 @@ class LobbyTest {
         boolean matched = lobby.play(dave, "dave", 1310); // within range of carol (1350), not alice (1200, 110 apart)
 
         assertTrue(matched);
-        assertTrue(carol.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT")));
-        assertTrue(dave.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT")));
+        assertTrue(carol.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
+        assertTrue(dave.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(alice.sentMessages.isEmpty()); // still waiting
     }
 
@@ -93,7 +99,7 @@ class LobbyTest {
 
         lobby.createRoom(alice, "alice", 1200);
 
-        assertTrue(alice.sentMessages.isEmpty(), "the creator must not see SEAT/STATE while alone in the room");
+        assertTrue(alice.sentMessages.isEmpty(), "the creator must not see WELCOME/STATE while alone in the room");
     }
 
     @Test void testBothPlayersAreGreetedTheMomentTheSecondOneJoinsARoom(@TempDir Path tempDir) {
@@ -104,9 +110,9 @@ class LobbyTest {
         GameSession session = lobby.createRoom(alice, "alice", 1200);
         lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
 
-        assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT")));
+        assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
-        assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT")));
+        assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
     }
 
@@ -120,7 +126,7 @@ class LobbyTest {
         lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
         lobby.joinRoom(session.getRoomCode(), carol, "carol", 1200);
 
-        assertTrue(carol.sentMessages.stream().anyMatch(m -> m.startsWith("SEAT VIEWER")));
+        assertTrue(carol.sentMessages.stream().anyMatch(m -> m.equals("WELCOME|role=VIEWER")));
         assertTrue(carol.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
     }
 
@@ -163,5 +169,53 @@ class LobbyTest {
         boolean matched = lobby.play(bob, "bob", 1200);
 
         assertFalse(matched); // alice was removed, so bob just queues instead of matching a stale entry
+    }
+
+    @Test void testPlayTimesOutAndTellsTheClientIfNoOpponentArrivesInTime(@TempDir Path tempDir) throws InterruptedException {
+        Lobby lobby = newLobbyWithShortMatchmakingTimeout(tempDir, 100L);
+        FakeWebSocket alice = new FakeWebSocket();
+
+        assertFalse(lobby.play(alice, "alice", 1200));
+        Thread.sleep(300);
+
+        assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("ERROR")));
+    }
+
+    @Test void testPlayDoesNotTimeOutOnceAlreadyMatched(@TempDir Path tempDir) throws InterruptedException {
+        Lobby lobby = newLobbyWithShortMatchmakingTimeout(tempDir, 100L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+
+        assertFalse(lobby.play(alice, "alice", 1200));
+        assertTrue(lobby.play(bob, "bob", 1200));
+        alice.sentMessages.clear(); // drop the WELCOME/STATE greeting so only a stray timeout ERROR would show up below
+        Thread.sleep(300); // the game's own ticker keeps sending fresh STATE messages in the meantime - that's expected
+
+        assertFalse(alice.sentMessages.stream().anyMatch(m -> m.startsWith("ERROR")),
+                "a matched player must not also receive a stale timeout error");
+    }
+
+    @Test void testTryReconnectRestoresADisconnectedPlayerToTheSameRoom(@TempDir Path tempDir) {
+        Lobby lobby = newLobby(tempDir);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+
+        GameSession session = lobby.createRoom(alice, "alice", 1200);
+        lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
+        lobby.handleDisconnect(alice);
+
+        FakeWebSocket aliceAgain = new FakeWebSocket();
+        boolean reconnected = lobby.tryReconnect(aliceAgain, "alice");
+
+        assertTrue(reconnected);
+        assertSame(session, lobby.sessionOf(aliceAgain));
+        assertEquals(Seat.WHITE, session.seatOf(aliceAgain));
+    }
+
+    @Test void testTryReconnectFailsForAUsernameWithNoDisconnectedSeat(@TempDir Path tempDir) {
+        Lobby lobby = newLobby(tempDir);
+        FakeWebSocket alice = new FakeWebSocket();
+
+        assertFalse(lobby.tryReconnect(alice, "nobody"));
     }
 }
