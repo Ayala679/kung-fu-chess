@@ -5,7 +5,7 @@
 #   powershell -File tools/fetch-libs.ps1
 #
 # Currently fetches:
-#   Java-WebSocket - used by server.KungFuChessServer and net.NetworkGameClient
+#   Java-WebSocket - used by server.KungFuChessServer and client.NetworkGameClient
 #   (both the WebSocket server and client side live in this one dependency-free jar)
 #   slf4j-api - Java-WebSocket's one runtime dependency (a logging facade only;
 #   with no binding on the classpath it just falls back to a no-op logger)

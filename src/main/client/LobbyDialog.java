@@ -1,4 +1,4 @@
-package net;
+package client;
 
 import java.awt.BorderLayout;
 import java.awt.Frame;
@@ -8,6 +8,8 @@ import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
+
+import server.Seat;
 
 /**
  * The alert shown right after Login/Register succeeds, before any board

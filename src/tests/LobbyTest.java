@@ -8,9 +8,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import bus.Bus;
 import logging.ActivityLog;
-import net.Seat;
 import server.GameSession;
 import server.Lobby;
+import server.Seat;
 import server.auth.UserRepository;
 
 class LobbyTest {

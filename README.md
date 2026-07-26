@@ -50,9 +50,9 @@ any time, and the board keeps animating continuously.
 
 ```bash
 powershell -File tools/fetch-libs.ps1   # downloads lib/Java-WebSocket + slf4j-api once
-cd src
-javac -encoding UTF-8 -cp "$(ls ../lib/*.jar | tr '\n' ';')" -d ../out @sources.txt
-cd ..
+cd src/main
+javac -encoding UTF-8 -cp "$(ls ../../lib/*.jar | tr '\n' ';')" -d ../../out @sources.txt
+cd ../..
 java -cp out GuiMain < resources/demo_board_8x8.txt
 ```
 
@@ -98,7 +98,7 @@ java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-j
 ```
 
 See [CLAUDE.md](CLAUDE.md) for how the networking layer is wired
-(`bus`/`net`/`server`/`logging` packages) without touching any of the core
+(`bus`/`client`/`server`/`logging` packages) without touching any of the core
 engine classes above (aside from one deliberate, narrow exception -
 `GameEngine.forceResign`, used for the disconnect timeout).
 
@@ -106,92 +106,104 @@ engine classes above (aside from one deliberate, narrow exception -
 
 ```
 src/
-├── bus/          ← generic in-process publish/subscribe (used by the server to
-│   │               broadcast snapshot updates; not used by offline play)
-│   └── Bus.java
+├── main/         ← all production code; src/main/sources.txt is the authoritative
+│   │               javac file list (compile from inside src/main/, see "Commands")
+│   │
+│   ├── bus/          ← generic in-process publish/subscribe (used by the server to
+│   │   │               broadcast snapshot updates; not used by offline play)
+│   │   └── Bus.java
+│   │
+│   ├── client/       ← code that only ever runs on the client (kept out of
+│   │   │               server/ so nothing there is mistaken for server-side logic)
+│   │   ├── NetworkGameClient.java  client-side event.GameClient impl over a WebSocket
+│   │   ├── LoginDialog.java    the sign-in alert shown before anything else opens
+│   │   └── LobbyDialog.java    Quick Play / Room (Create/Join) alert shown after sign-in
+│   │
+│   ├── server/       ← the networked game server (see "Playing it over the network")
+│   │   ├── Protocol.java       message-prefix constants (LOGIN/REGISTER/AUTH_OK/PLAY/
+│   │   │                       CREATE_ROOM/JOIN_ROOM/WAITING/ROOM_CREATED/SEAT/ERROR/STATE) -
+│   │   │                       genuinely shared with the client, but not client-only either
+│   │   ├── Seat.java           WHITE/BLACK/VIEWER - what a connection was assigned
+│   │   ├── SnapshotCodec.java  GameSnapshot ⇄ plain-text block (no JSON dependency)
+│   │   ├── KungFuChessServer.java  accepts connections, authenticates, routes lobby commands
+│   │   ├── Lobby.java              the "tournament manager": rooms + ELO matchmaking queue
+│   │   ├── GameSession.java        owns one game's Board/GameEngine + ticker + ratings +
+│   │   │                           spectators + the disconnect auto-resign timer
+│   │   └── auth/
+│   │       ├── UserRepository.java   accounts + ratings, persisted to a SQLite file
+│   │       ├── PasswordHasher.java   salted SHA-256 (passwords are never stored in the clear)
+│   │       └── EloCalculator.java    standard ELO win/loss rating update
+│   │
+│   ├── logging/      ← append-only timestamped text logs (server + each client)
+│   │   └── ActivityLog.java
+│   │
+│   ├── model/        ← pure data (no game logic)
+│   │   ├── Position.java      immutable (row,col) + distance helpers
+│   │   ├── Piece.java         color + type, promotedAt() (no token knowledge)
+│   │   ├── Board.java         the grid + safe cell accessors
+│   │   ├── MovingPiece.java   a piece in transit (from→to, timing)
+│   │   └── GameState.java     virtual clock + game-over flag
+│   │
+│   ├── parsing/      ← turn raw text into a Board (owns the "wK" token format)
+│   │   ├── BoardParser.java   text → String[][] (+ row-width check)
+│   │   ├── BoardValidator.java validates tokens
+│   │   ├── PieceMapper.java   token ↔ Piece (parse / format), the only token codec
+│   │   └── BoardMapper.java   orchestrates parse → validate → map to Board
+│   │
+│   ├── ruleengine/   ← "is this move allowed?" (never mutates anything)
+│   │   ├── PieceRules.java     one switch-case: geometry per piece type
+│   │   └── MoveValidator.java  general checks for ANY piece (source non-empty, not
+│   │                           friendly-occupied, path clear) — no piece type, no config
+│   │
+│   ├── gameengine/   ← the game itself
+│   │   ├── GameEngine.java     central gateway: validates, schedules, decides game-over
+│   │   └── RealTimeArbiter.java owns pieces-in-transit, jump/dodge races, head-on
+│   │                           collisions, capture scoring and the virtual clock
+│   │
+│   ├── event/        ← the input side
+│   │   ├── EventEngine.java    owns the local, single-mouse selection; delegates the
+│   │   │                       actual click rules to ClickSelector
+│   │   ├── ClickSelector.java  select / cancel / re-select / move-request, as a pure
+│   │   │                       function - shared with server.GameSession's per-color use
+│   │   ├── GameClient.java     the interface BoardWindow needs - EventEngine (offline) and
+│   │   │                       client.NetworkGameClient (networked) both implement it
+│   │   ├── EventMapper.java    command string → GameEvent
+│   │   ├── InputMapper.java    pixel coords → cell coords
+│   │   ├── EventDispatcher.java routes events to the EventEngine
+│   │   ├── GameEvent.java + *EventImpl.java  one event type per command
+│   │   └── ClickEvent.java / CellClickEvent.java  input data holders
+│   │
+│   ├── snapshot/     ← render-ready, immutable description of "the board right now"
+│   │   ├── GameSnapshot.java    pieces, scores, move history, selection, legal moves
+│   │   ├── PieceSnapshot.java / PieceVisualState.java  per-piece animation state
+│   │   ├── SnapshotBuilder.java builds a snapshot from the live model
+│   │   └── MoveNotation.java    algebraic-style move text for the history panel
+│   │
+│   ├── view/
+│   │   ├── BoardRenderer.java  text rendering (stdout), incl. in-transit pieces
+│   │   ├── ImgRenderer.java    graphical rendering onto the dashboard image
+│   │   ├── BoardWindow.java    the interactive Swing window (mouse + animation timer)
+│   │   ├── PieceSprites.java   picks the right sprite frame per piece/animation state
+│   │   └── Img.java / BoardGeometry.java  small image + pixel/cell math helpers
+│   │
+│   ├── controller/
+│   │   └── BoardController.java wires the whole chain, exposes executeCommand()
+│   │
+│   ├── config/
+│   │   └── GameConfig.java     all constants (durations, cell size, token patterns)
+│   │
+│   ├── Main.java               console entry point: reads stdin, drives BoardController
+│   ├── GuiMain.java            graphical entry point: opens the interactive BoardWindow, offline
+│   ├── NetworkGuiMain.java     graphical entry point: opens the same BoardWindow, over the network
+│   └── sources.txt             the javac file list (excludes src/tests/)
 │
-├── net/          ← the client<->server wire protocol, shared source (no separate
-│   │               client/server modules - this project has no build tool)
-│   ├── Protocol.java       message-prefix constants (LOGIN/REGISTER/AUTH_OK/PLAY/
-│   │                       CREATE_ROOM/JOIN_ROOM/WAITING/ROOM_CREATED/SEAT/ERROR/STATE)
-│   ├── Seat.java           WHITE/BLACK/VIEWER - what a connection was assigned
-│   ├── SnapshotCodec.java  GameSnapshot ⇄ plain-text block (no JSON dependency)
-│   ├── NetworkGameClient.java  client-side event.GameClient impl over a WebSocket
-│   ├── LoginDialog.java    the sign-in alert shown before anything else opens
-│   └── LobbyDialog.java    Quick Play / Room (Create/Join) alert shown after sign-in
-│
-├── server/       ← the networked game server (see "Playing it over the network")
-│   ├── KungFuChessServer.java  accepts connections, authenticates, routes lobby commands
-│   ├── Lobby.java              the "tournament manager": rooms + ELO matchmaking queue
-│   ├── GameSession.java        owns one game's Board/GameEngine + ticker + ratings +
-│   │                           spectators + the disconnect auto-resign timer
-│   └── auth/
-│       ├── UserRepository.java   accounts + ratings, persisted to a SQLite file
-│       ├── PasswordHasher.java   salted SHA-256 (passwords are never stored in the clear)
-│       └── EloCalculator.java    standard ELO win/loss rating update
-│
-├── logging/      ← append-only timestamped text logs (server + each client)
-│   └── ActivityLog.java
-│
-├── model/        ← pure data (no game logic)
-│   ├── Position.java      immutable (row,col) + distance helpers
-│   ├── Piece.java         color + type, promotedAt() (no token knowledge)
-│   ├── Board.java         the grid + safe cell accessors
-│   ├── MovingPiece.java   a piece in transit (from→to, timing)
-│   └── GameState.java     virtual clock + game-over flag
-│
-├── parsing/      ← turn raw text into a Board (owns the "wK" token format)
-│   ├── BoardParser.java   text → String[][] (+ row-width check)
-│   ├── BoardValidator.java validates tokens
-│   ├── PieceMapper.java   token ↔ Piece (parse / format), the only token codec
-│   └── BoardMapper.java   orchestrates parse → validate → map to Board
-│
-├── ruleengine/   ← "is this move allowed?" (never mutates anything)
-│   ├── PieceRules.java     one switch-case: geometry per piece type
-│   └── MoveValidator.java  general checks for ANY piece (source non-empty, not
-│                           friendly-occupied, path clear) — no piece type, no config
-│
-├── gameengine/   ← the game itself
-│   ├── GameEngine.java     central gateway: validates, schedules, decides game-over
-│   └── RealTimeArbiter.java owns pieces-in-transit, jump/dodge races, head-on
-│                           collisions, capture scoring and the virtual clock
-│
-├── event/        ← the input side
-│   ├── EventEngine.java    owns the local, single-mouse selection; delegates the
-│   │                       actual click rules to ClickSelector
-│   ├── ClickSelector.java  select / cancel / re-select / move-request, as a pure
-│   │                       function - shared with server.GameSession's per-color use
-│   ├── GameClient.java     the interface BoardWindow needs - EventEngine (offline) and
-│   │                       net.NetworkGameClient (networked) both implement it
-│   ├── EventMapper.java    command string → GameEvent
-│   ├── InputMapper.java    pixel coords → cell coords
-│   ├── EventDispatcher.java routes events to the EventEngine
-│   ├── GameEvent.java + *EventImpl.java  one event type per command
-│   └── ClickEvent.java / CellClickEvent.java  input data holders
-│
-├── snapshot/     ← render-ready, immutable description of "the board right now"
-│   ├── GameSnapshot.java    pieces, scores, move history, selection, legal moves
-│   ├── PieceSnapshot.java / PieceVisualState.java  per-piece animation state
-│   ├── SnapshotBuilder.java builds a snapshot from the live model
-│   └── MoveNotation.java    algebraic-style move text for the history panel
-│
-├── view/
-│   ├── BoardRenderer.java  text rendering (stdout), incl. in-transit pieces
-│   ├── ImgRenderer.java    graphical rendering onto the dashboard image
-│   ├── BoardWindow.java    the interactive Swing window (mouse + animation timer)
-│   ├── PieceSprites.java   picks the right sprite frame per piece/animation state
-│   └── Img.java / BoardGeometry.java  small image + pixel/cell math helpers
-│
-├── controller/
-│   └── BoardController.java wires the whole chain, exposes executeCommand()
-│
-├── config/
-│   └── GameConfig.java     all constants (durations, cell size, token patterns)
-│
-├── Main.java               console entry point: reads stdin, drives BoardController
-├── GuiMain.java            graphical entry point: opens the interactive BoardWindow, offline
-└── NetworkGuiMain.java     graphical entry point: opens the same BoardWindow, over the network
+└── tests/        ← JUnit 5 tests, flat (no subpackage) - see "Tests & coverage" below
 ```
+
+Runtime image/text assets (`board.png`, `dashboard.png`, per-piece sprite
+sheets, the demo board fixture) live in a separate top-level `resources/`
+folder at the repo root, not under `src/` - read via relative paths at
+runtime, so the `java` invocations below run from the repo root.
 
 ## How a command flows
 

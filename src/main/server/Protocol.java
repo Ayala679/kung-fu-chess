@@ -1,4 +1,4 @@
-package net;
+package server;
 
 /**
  * Message prefixes for the client<->server text protocol. Board commands
@@ -9,7 +9,7 @@ package net;
  * Every server -> client tagged message with a payload is pipe-delimited
  * ("TAG|value" or "TAG|key=value"), matching the CTD 26 brief's own wire
  * examples - except WAITING (no payload) and STATE (a multi-line block,
- * not a simple tag, encoded separately by net.SnapshotCodec).
+ * not a simple tag, encoded separately by SnapshotCodec).
  */
 public final class Protocol {
     private Protocol() {}

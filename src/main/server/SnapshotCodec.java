@@ -1,4 +1,4 @@
-package net;
+package server;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -15,7 +15,7 @@ import snapshot.PieceVisualState;
  * ImgRenderer needs every in-flight piece's animation progress - not just a
  * static board - to render the client's window. Plain text (not JSON) to
  * match the project's existing token/command conventions and avoid another
- * dependency. Pure functions, no I/O - see net.Protocol for how the block
+ * dependency. Pure functions, no I/O - see Protocol for how the block
  * this produces is framed as a "STATE" message.
  */
 public final class SnapshotCodec {

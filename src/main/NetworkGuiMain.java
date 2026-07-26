@@ -8,9 +8,9 @@ import javax.swing.JLabel;
 import javax.swing.SwingConstants;
 import javax.swing.Timer;
 
-import net.LobbyDialog;
-import net.LoginDialog;
-import net.NetworkGameClient;
+import client.LobbyDialog;
+import client.LoginDialog;
+import client.NetworkGameClient;
 import view.BoardWindow;
 import view.ImgRenderer;
 

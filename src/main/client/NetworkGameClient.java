@@ -1,4 +1,4 @@
-package net;
+package client;
 
 import java.net.URI;
 import java.util.concurrent.CountDownLatch;
@@ -9,6 +9,9 @@ import org.java_websocket.handshake.ServerHandshake;
 
 import event.GameClient;
 import logging.ActivityLog;
+import server.Protocol;
+import server.Seat;
+import server.SnapshotCodec;
 import snapshot.GameSnapshot;
 
 /**

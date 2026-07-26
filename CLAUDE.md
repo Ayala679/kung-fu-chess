@@ -18,7 +18,7 @@ by a `tools/*.ps1` script on first use).
 ## Commands
 
 Fetch runtime dependencies once (Java-WebSocket + its slf4j-api dependency,
-and sqlite-jdbc - used by the `server`/`net` packages):
+and sqlite-jdbc - used by the `server`/`client` packages):
 ```powershell
 powershell -File tools/fetch-libs.ps1
 ```
@@ -27,12 +27,19 @@ Build (from repo root - the classpath is needed even for offline-only work,
 since `sources.txt` compiles the whole project, networking code included,
 in one `javac` invocation):
 ```bash
-cd src
-javac -encoding UTF-8 -cp "../lib/Java-WebSocket-1.5.6.jar;../lib/slf4j-api-2.0.13.jar;../lib/sqlite-jdbc-3.46.1.3.jar" -d ../out @sources.txt
-cd ..
+cd src/main
+javac -encoding UTF-8 -cp "../../lib/Java-WebSocket-1.5.6.jar;../../lib/slf4j-api-2.0.13.jar;../../lib/sqlite-jdbc-3.46.1.3.jar" -d ../../out @sources.txt
+cd ../..
 ```
-`sources.txt` (in `src/`) is the authoritative file list for `javac`; it
-excludes `src/tests/`. Add new non-test classes to it when creating files.
+`sources.txt` (in `src/main/`) is the authoritative file list for `javac`;
+production code lives under `src/main/` and tests live separately under
+`src/tests/` - `sources.txt` only ever lists the former. Add new non-test
+classes to it when creating files. Image/text assets (`board.png`,
+`dashboard.png`, per-piece sprite sheets, the demo board fixture) live in a
+separate top-level `resources/` folder at the repo root (not under `src/`),
+loaded at runtime via relative paths, so `java` invocations below must run
+from the repo root (their working directory) for those relative paths to
+resolve.
 
 Run the graphical version (opens an interactive Swing window; mouse-driven,
 right-click to jump):
@@ -186,7 +193,7 @@ Three entry points: `Main` (console/Scanner, headless, what tests drive),
 single `public static void main` for graders/tools that auto-detect the
 entry point.
 
-## Networking (bus/, net/, server/, logging/)
+## Networking (bus/, client/, server/, logging/)
 
 Added on top of the layers above with **one deliberate exception**
 (`GameEngine.forceResign`, above) - a networked game is driven by the exact
@@ -194,11 +201,16 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
 
 - **event/GameClient** - the interface `view.BoardWindow` actually depends
   on (`handleClick`/`handleJump`/`waitFor`/`snapshot`). `EventEngine`
-  implements it for local play; `net.NetworkGameClient` implements it for
+  implements it for local play; `client.NetworkGameClient` implements it for
   networked play. `BoardWindow` itself has no idea which one it has.
-- **net/** - the wire protocol, compiled as regular source alongside
-  everything else (no separate client/server module - this project has no
-  build tool to make that split meaningful).
+- **Wire protocol** (`Protocol`/`Seat`/`SnapshotCodec`, all in `server/`
+  alongside the rest of the server implementation - genuinely shared between
+  client and server, not exclusively server-side logic, but the project has
+  no separate client/server module to put "shared" code in, and they aren't
+  client-only either, so they live with `server/`'s other classes; the
+  actual client-only code is `client/`, below) - compiled as regular source
+  alongside everything else (still one `javac` invocation, no build-tool
+  split).
   - `Protocol` - the message prefixes specific to the network layer.
     Client→server commands (`login`/`register`, `play`/`create_room`/
     `join_room <code>`, `click row col`/`jump row col`) stay space-
@@ -252,7 +264,7 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     `RealTimeArbiter`'s timing math on the client was judged a regression,
     not an improvement, against this project's single-source-of-truth
     principle.
-  - This required two small, additive changes below `net/`:
+  - This required two small, additive changes elsewhere:
     `GameEngine.requestMove`/`requestJump` now return `boolean` (true iff
     the action actually started - `void` before), and
     `event.ClickSelector.handleClick` now returns a `Result(Position
@@ -272,6 +284,8 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     project's existing token/command conventions and avoiding another
     dependency. Pure functions - see `tests/SnapshotCodecTest.java` for the
     expected round-trip shape before changing the format.
+- **client/** - the code that only ever runs on the client, kept out of
+  `server/` on purpose so nothing there is mistaken for server-side logic.
   - `NetworkGameClient` (a `WebSocketClient`) - `register()`/`login()` block
     (via a `CountDownLatch`) until `AUTH_OK` or `ERROR`. What happens next
     (quick-match vs. room) is inherently asynchronous - the server may reply
@@ -316,7 +330,7 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     disconnected from, `GameSession.reconnect(...)` restores that exact
     seat (cancelling the pending auto-resign task) and re-greets the
     connection (`SEAT` + a fresh `STATE`) - silently, with no new protocol
-    message of its own. `net.LobbyDialog.chooseAndWait` checks
+    message of its own. `client.LobbyDialog.chooseAndWait` checks
     `client.getAssignedSeat() != null` at the very top and returns
     immediately if so, so a reconnected player is never asked to pick
     Quick Play/Room again for a game they're already back in.

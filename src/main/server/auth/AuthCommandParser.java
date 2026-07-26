@@ -1,6 +1,6 @@
 package server.auth;
 
-import net.Protocol;
+import server.Protocol;
 
 /**
  * The single place that knows the raw "login/register &lt;username&gt;

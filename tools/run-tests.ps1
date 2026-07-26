@@ -15,6 +15,8 @@ $tools = Join-Path $root "tools"
 $lib = Join-Path $root "lib"
 $out = Join-Path $root "out"
 $src = Join-Path $root "src"
+$mainSrc = Join-Path $src "main"
+$testSrc = Join-Path $src "tests"
 
 & (Join-Path $tools "fetch-libs.ps1")
 $libJars = (Get-ChildItem $lib -Filter *.jar | ForEach-Object { $_.FullName }) -join ";"
@@ -47,14 +49,14 @@ New-Item -ItemType Directory -Force $mainClasses | Out-Null
 New-Item -ItemType Directory -Force $testClasses | Out-Null
 
 Write-Host "Compiling main sources..."
-Push-Location $src
+Push-Location $mainSrc
 & javac -encoding UTF-8 -cp "$libJars" -d $mainClasses "@sources.txt"
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Main source compilation failed" }
+Pop-Location
 
 Write-Host "Compiling tests..."
-& javac -encoding UTF-8 -cp "$mainClasses;$junitJar;$libJars" -d $testClasses (Get-ChildItem "tests\*.java" | ForEach-Object { $_.FullName })
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Test compilation failed" }
-Pop-Location
+& javac -encoding UTF-8 -cp "$mainClasses;$junitJar;$libJars" -d $testClasses (Get-ChildItem (Join-Path $testSrc "*.java") | ForEach-Object { $_.FullName })
+if ($LASTEXITCODE -ne 0) { throw "Test compilation failed" }
 
 $execFile = Join-Path $out "jacoco.exec"
 Remove-Item $execFile -ErrorAction SilentlyContinue
@@ -65,7 +67,7 @@ $testExit = $LASTEXITCODE
 
 Write-Host "Generating coverage report..."
 $reportDir = Join-Path $out "coverage-html"
-& java -jar $jacocoCli report $execFile --classfiles $mainClasses --sourcefiles $src --html $reportDir --name "Kung Fu Chess Coverage"
+& java -jar $jacocoCli report $execFile --classfiles $mainClasses --sourcefiles $mainSrc --html $reportDir --name "Kung Fu Chess Coverage"
 
 Write-Host ""
 Write-Host "Coverage report: $reportDir\index.html"

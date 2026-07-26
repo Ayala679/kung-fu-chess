@@ -8,9 +8,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import bus.Bus;
 import logging.ActivityLog;
-import net.Seat;
-import net.SnapshotCodec;
 import server.GameSession;
+import server.Seat;
+import server.SnapshotCodec;
 import server.auth.UserRepository;
 import snapshot.GameSnapshot;
 

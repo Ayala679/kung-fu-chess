@@ -27,12 +27,9 @@ model/MovingPiece.java
 model/Piece.java
 model/Position.java
 model/RestingPiece.java
-net/LobbyDialog.java
-net/LoginDialog.java
-net/NetworkGameClient.java
-net/Protocol.java
-net/Seat.java
-net/SnapshotCodec.java
+client/LobbyDialog.java
+client/LoginDialog.java
+client/NetworkGameClient.java
 parsing/BoardMapper.java
 parsing/BoardParser.java
 parsing/BoardValidator.java
@@ -43,6 +40,9 @@ ruleengine/RuleEngine.java
 server/GameSession.java
 server/KungFuChessServer.java
 server/Lobby.java
+server/Protocol.java
+server/Seat.java
+server/SnapshotCodec.java
 server/auth/AuthCommandParser.java
 server/auth/AuthController.java
 server/auth/EloCalculator.java

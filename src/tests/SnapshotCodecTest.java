@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import model.MoveLogEntry;
 import model.Piece;
 import model.Position;
-import net.SnapshotCodec;
+import server.SnapshotCodec;
 import snapshot.GameSnapshot;
 import snapshot.PieceSnapshot;
 import snapshot.PieceVisualState;

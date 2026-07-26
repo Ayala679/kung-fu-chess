@@ -14,7 +14,6 @@ import org.java_websocket.WebSocket;
 
 import bus.Bus;
 import logging.ActivityLog;
-import net.Protocol;
 import server.auth.UserRepository;
 
 /**
