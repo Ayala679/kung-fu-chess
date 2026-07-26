@@ -31,7 +31,7 @@ public final class LobbyDialog {
     public static void chooseAndWait(NetworkGameClient client) {
         if (client.getAssignedSeat() != null) {
             // KungFuChessServer already silently reconnected us to a game we
-            // were disconnected from (see Lobby.tryReconnect) - SEAT/STATE
+            // were disconnected from (see Lobby.tryReconnect) - WELCOME/STATE
             // arrived right after AUTH_OK, before this dialog ever ran.
             // Asking to pick Quick Play/Room again would just send a lobby
             // command to a connection already attached to a GameSession.

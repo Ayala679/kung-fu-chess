@@ -56,6 +56,7 @@ public class KungFuChessServer extends WebSocketServer {
         // Login/register happens on the connection's first text message - see onMessage.
     }
 
+    // Routes by connection state: not authenticated -> handleAuth; authenticated + in a session -> session.handleCommand; authenticated, no session yet -> handleLobbyCommand.
     @Override
     public void onMessage(WebSocket conn, String message) {
         if (!usernames.containsKey(conn)) {
@@ -72,6 +73,7 @@ public class KungFuChessServer extends WebSocketServer {
         handleLobbyCommand(conn, message);
     }
 
+    // Parses "login/register" via authController, replies AUTH_OK/ERROR, then calls lobby.tryReconnect on success.
     private void handleAuth(WebSocket conn, String message) {
         AuthController.Outcome outcome = authController.handleAuth(message);
         if (outcome.isMalformed()) {
@@ -97,6 +99,7 @@ public class KungFuChessServer extends WebSocketServer {
         lobby.tryReconnect(conn, outcome.getUsername());
     }
 
+    // Dispatches "play"/"create_room"/"join_room <code>" to the matching Lobby method.
     private void handleLobbyCommand(WebSocket conn, String message) {
         String username = usernames.get(conn);
         int rating = ratings.get(conn);

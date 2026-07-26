@@ -61,6 +61,7 @@ public class UserRepository {
         public int getRating() { return rating; }
     }
 
+    // Creates a new account with a fresh salt+hash (calls PasswordHasher); fails if the username is taken.
     public AuthResult register(String username, String password) {
         try (Connection conn = connect()) {
             if (findRating(conn, username) != null) {
@@ -82,6 +83,7 @@ public class UserRepository {
         }
     }
 
+    // Looks up the stored salt/hash and checks the password via PasswordHasher.matches.
     public AuthResult authenticate(String username, String password) {
         try (Connection conn = connect();
              PreparedStatement ps = conn.prepareStatement(

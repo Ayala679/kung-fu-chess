@@ -289,7 +289,7 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
   - `NetworkGameClient` (a `WebSocketClient`) - `register()`/`login()` block
     (via a `CountDownLatch`) until `AUTH_OK` or `ERROR`. What happens next
     (quick-match vs. room) is inherently asynchronous - the server may reply
-    `WAITING` and only send a `SEAT` once a real opponent shows up - so
+    `WAITING` and only send a `WELCOME` once a real opponent shows up - so
     `requestPlay()`/`createRoom()`/`joinRoom(code)` are fire-and-forget and
     a `LobbyListener` callback (`onWaiting`/`onRoomCreated`/`onSeated`/
     `onLobbyError`) reports what happens; `awaitFirstSnapshot(...)` blocks
@@ -329,17 +329,17 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     (White/Black - never a spectator) in a session it was since
     disconnected from, `GameSession.reconnect(...)` restores that exact
     seat (cancelling the pending auto-resign task) and re-greets the
-    connection (`SEAT` + a fresh `STATE`) - silently, with no new protocol
+    connection (`WELCOME` + a fresh `STATE`) - silently, with no new protocol
     message of its own. `client.LobbyDialog.chooseAndWait` checks
     `client.getAssignedSeat() != null` at the very top and returns
     immediately if so, so a reconnected player is never asked to pick
     Quick Play/Room again for a game they're already back in.
-  - `GameSession.join(...)` does its own greeting (`SEAT` + that
+  - `GameSession.join(...)` does its own greeting (`WELCOME` + that
     connection's snapshot) rather than leaving it to the caller - and, for
     the first (White) seat, deliberately **doesn't** greet at all: with no
     opponent yet there's nothing to show, so that client just keeps
     whatever "waiting for an opponent..." UI it already had up
-    (`LobbyDialog`'s modal dialog stays open, since no `SEAT` ever arrives
+    (`LobbyDialog`'s modal dialog stays open, since no `WELCOME` ever arrives
     to close it). The moment the second (Black) seat fills, `join(...)`
     greets **both** connections at once and calls
     `engine.setPlayerNames(whiteUsername, blackUsername)` so the snapshot -

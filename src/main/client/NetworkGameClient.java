@@ -18,7 +18,7 @@ import snapshot.GameSnapshot;
  * Client-side counterpart to server.KungFuChessServer/Lobby/GameSession.
  * Two stages: authenticate (login/register), then pick a game (quick-match
  * "play", or create/join a room) - the latter is inherently asynchronous
- * (the server may reply WAITING and only send a SEAT once an opponent
+ * (the server may reply WAITING and only send a WELCOME once an opponent
  * actually arrives), so it's callback-driven via {@link LobbyListener}
  * rather than a single blocking call. Once seated, this turns
  * view.BoardWindow's clicks/jumps into text frames and exposes whatever
@@ -74,7 +74,7 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         }
     }
 
-    /** Set before requestPlay()/createRoom()/joinRoom() - notified of WAITING/ROOM_CREATED/SEAT/errors. */
+    /** Set before requestPlay()/createRoom()/joinRoom() - notified of WAITING/ROOM_CREATED/WELCOME/errors. */
     public void setLobbyListener(LobbyListener listener) {
         this.lobbyListener = listener;
     }

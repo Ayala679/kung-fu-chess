@@ -20,7 +20,7 @@ import server.auth.UserRepository;
  * The "tournament manager": opens rooms, matches waiting players by ELO, and
  * hands each WebSocket connection off to the right GameSession. Everything
  * about actually playing a game - including greeting a connection once it's
- * actually seated (SEAT + board snapshot) - is delegated entirely to
+ * actually seated (WELCOME + board snapshot) - is delegated entirely to
  * GameSession/GameEngine; this class only ever decides WHICH session a
  * connection belongs to.
  */
@@ -110,7 +110,7 @@ public class Lobby {
 
     /**
      * "play": pairs with any currently-waiting player within +-100 ELO and
-     * returns true (GameSession.join itself greets both sides - SEAT +
+     * returns true (GameSession.join itself greets both sides - WELCOME +
      * initial snapshot - the moment the second one joins). If no one
      * waiting is close enough, this connection joins the queue and false is
      * returned (caller sends WAITING); if no opponent arrives within
@@ -173,6 +173,7 @@ public class Lobby {
         if (session != null) session.handleDisconnect(connection);
     }
 
+    // Generates a random unused 6-char room code (retries on collision).
     private String newRoomCode() {
         String code;
         do {

@@ -121,7 +121,7 @@ src/
 │   │
 │   ├── server/       ← the networked game server (see "Playing it over the network")
 │   │   ├── Protocol.java       message-prefix constants (LOGIN/REGISTER/AUTH_OK/PLAY/
-│   │   │                       CREATE_ROOM/JOIN_ROOM/WAITING/ROOM_CREATED/SEAT/ERROR/STATE) -
+│   │   │                       CREATE_ROOM/JOIN_ROOM/WAITING/ROOM_CREATED/WELCOME/ERROR/STATE) -
 │   │   │                       genuinely shared with the client, but not client-only either
 │   │   ├── Seat.java           WHITE/BLACK/VIEWER - what a connection was assigned
 │   │   ├── SnapshotCodec.java  GameSnapshot ⇄ plain-text block (no JSON dependency)

@@ -165,7 +165,7 @@ public class GameSession {
     /**
      * Seats the first connection White, the second Black, and every one
      * after that as a read-only VIEWER. The White seat gets no greeting
-     * (SEAT/STATE) yet - there's no game to show until an opponent
+     * (WELCOME/STATE) yet - there's no game to show until an opponent
      * arrives - so its client just keeps showing "waiting for an
      * opponent...". Once Black joins, both are greeted together and the
      * game actually starts; a VIEWER joining an already-running game is
@@ -196,6 +196,7 @@ public class GameSession {
         return Seat.VIEWER;
     }
 
+    // Sends WELCOME + one initial snapshot to a newly-seated connection. Calls buildSnapshotFor/buildNeutralSnapshot.
     private void greet(WebSocket connection, Seat seat) {
         send(connection, Protocol.WELCOME + "|role=" + seat);
         GameSnapshot snapshot = seat.isPlayer() ? buildSnapshotFor(seat.toColor()) : buildNeutralSnapshot();
@@ -213,6 +214,7 @@ public class GameSession {
         scheduler.scheduleAtFixedRate(this::tick, TICK_MS, TICK_MS, TimeUnit.MILLISECONDS);
     }
 
+    // Runs every TICK_MS on the scheduler thread. Calls engine.advanceTime, then resolvePendingActions, then broadcastSnapshot.
     private void tick() {
         synchronized (lock) {
             engine.advanceTime(TICK_MS);
@@ -428,7 +430,7 @@ public class GameSession {
      * Restores a previously-seated player who reconnects (identified by
      * username - the same username that was seated before) while their seat
      * is still vacated: cancels the pending auto-resign task and re-greets
-     * them exactly like a fresh join (SEAT + a fresh snapshot). Returns
+     * them exactly like a fresh join (WELCOME + a fresh snapshot). Returns
      * false if {@code username} doesn't match a currently-vacated seat in
      * this session - it was never a player here, or that seat isn't
      * actually empty (e.g. already reconnected, or this is a stale/duplicate
@@ -452,6 +454,7 @@ public class GameSession {
         return false;
     }
 
+    // Cancels a pending scheduleForcedResign task for one color, if any (called by reconnect).
     private void cancelResignTask(Piece.Color color) {
         if (color == Piece.Color.WHITE) {
             if (whiteResignTask != null) whiteResignTask.cancel(false);
@@ -462,6 +465,7 @@ public class GameSession {
         }
     }
 
+    // Schedules a one-shot auto-resign for disconnectedColor after disconnectResignDelayMillis; calls engine.forceResign when it fires. Cancelled by cancelResignTask on reconnect.
     private ScheduledFuture<?> scheduleForcedResign(Piece.Color disconnectedColor) {
         if (whiteUsername == null || blackUsername == null) return null; // never became a real 2-player game
         activityLog.log("room=" + roomCode + " " + disconnectedColor + " disconnected - auto-resign in "
@@ -475,6 +479,7 @@ public class GameSession {
         }, disconnectResignDelayMillis, TimeUnit.MILLISECONDS);
     }
 
+    // Sends a fresh STATE to White, Black and every viewer; also publishes to bus and calls applyRatingChangeIfGameJustEnded.
     private void broadcastSnapshot() {
         GameSnapshot whiteView = buildSnapshotFor(Piece.Color.WHITE);
         GameSnapshot blackView = buildSnapshotFor(Piece.Color.BLACK);

@@ -22,6 +22,7 @@ public final class PasswordHasher {
         return Base64.getEncoder().encodeToString(salt);
     }
 
+    // SHA-256 over (salt + password); same salt+password always produces the same hash.
     public static String hash(String password, String salt) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -33,6 +34,7 @@ public final class PasswordHasher {
         }
     }
 
+    // Re-hashes the candidate password and compares to the stored hash - never compares raw passwords.
     public static boolean matches(String password, String salt, String expectedHash) {
         return hash(password, salt).equals(expectedHash);
     }
