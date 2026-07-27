@@ -47,6 +47,7 @@ server/auth/AuthCommandParser.java
 server/auth/AuthController.java
 server/auth/EloCalculator.java
 server/auth/PasswordHasher.java
+server/auth/RatingService.java
 server/auth/UserRepository.java
 snapshot/GameSnapshot.java
 snapshot/MoveNotation.java

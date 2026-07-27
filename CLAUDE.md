@@ -107,9 +107,11 @@ stdin ─▶ BoardController ─▶ EventDispatcher ─▶ EventEngine ─▶ Ga
   - `GameEngine` is the single gateway for every action (`requestMove`,
     `requestJump`, `advanceTime`, `printBoard`, `buildSnapshot`,
     `forceResign` - a resignation, ending the game exactly like a king
-    capture does via `GameState.setGameOver`; the one deliberate touch the
-    networking layer made to this package, used for the disconnect
-    auto-resign timeout - see "Networking" below). It asks
+    capture does via `GameState.setGameOver`; `abandon` - ends the game with
+    **no** winner via the new `GameState.abandon()`, used when a disconnect
+    grace window elapses with nobody to fairly credit with a win - these two
+    are the deliberate touches the networking layer makes to this package,
+    see "Networking" below). It asks
     `RuleEngine` for legality, then hands timing/scheduling to
     `RealTimeArbiter`. It also owns move history (per-color `MoveLogEntry`
     lists) and `legalDestinationsFrom` (used to highlight legal moves in the
@@ -173,7 +175,14 @@ stdin ─▶ BoardController ─▶ EventDispatcher ─▶ EventEngine ─▶ Ga
   elapsed ms into `EventEngine.waitFor` (so animation runs on its own
   without needing typed `wait` commands), and a mouse handler that
   left-clicks (`handleClick`) or right-clicks (`handleJump`, in-place
-  dodge). `ImgRenderer` composites onto `resources/dashboard.png` (board +
+  dodge). A key listener also binds `R` to `GameClient.requestRematch()`
+  once `snapshot().gameOver()` - a no-op offline, a real `"rematch"` command
+  networked. On every `refresh()`, if `GameClient.millisUntilOpponentAutoAbandon()`
+  is positive (only ever true for `NetworkGameClient`), `ImgRenderer.drawDisconnectCountdown`
+  is called as an extra post-processing step on top of the normal `render(...)`
+  frame - kept as a *separate* call rather than a `render(...)` parameter so
+  `GameSnapshot` itself never has to carry a purely-networking concept.
+  `ImgRenderer` composites onto `resources/dashboard.png` (board +
   move tables + score) using only `Img`'s own tiny API (`read`/`drawOn`/
   `putText`) - no direct AWT calls outside `Img`/`BoardWindow`.
 - **controller/** - `BoardController.readFrom(Scanner)` wires the whole
@@ -195,12 +204,16 @@ entry point.
 
 ## Networking (bus/, client/, server/, logging/)
 
-Added on top of the layers above with **one deliberate exception**
-(`GameEngine.forceResign`, above) - a networked game is driven by the exact
+Added on top of the layers above with **two deliberate exceptions**
+(`GameEngine.forceResign`/`abandon`, above) - a networked game is driven by the exact
 same `GameEngine` a local session uses; only what sits *around* it differs.
 
 - **event/GameClient** - the interface `view.BoardWindow` actually depends
-  on (`handleClick`/`handleJump`/`waitFor`/`snapshot`). `EventEngine`
+  on (`handleClick`/`handleJump`/`waitFor`/`snapshot`, plus two `default`
+  methods only `client.NetworkGameClient` overrides for real -
+  `millisUntilOpponentAutoAbandon()` and `requestRematch()` - offline play
+  keeps the default no-op/zero implementation, since neither concept exists
+  without a network). `EventEngine`
   implements it for local play; `client.NetworkGameClient` implements it for
   networked play. `BoardWindow` itself has no idea which one it has.
 - **Wire protocol** (`Protocol`/`Seat`/`SnapshotCodec`, all in `server/`
@@ -213,23 +226,28 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
   split).
   - `Protocol` - the message prefixes specific to the network layer.
     Client→server commands (`login`/`register`, `play`/`create_room`/
-    `join_room <code>`, `click row col`/`jump row col`) stay space-
-    delimited. Every server→client *tagged* reply with a payload is
+    `join_room <code>`, `click row col`/`jump row col`, `rematch`) stay
+    space-delimited (`rematch` takes no arguments - it's just the bare
+    verb). Every server→client *tagged* reply with a payload is
     pipe-delimited (`TAG|value`, matching the CTD 26 brief's own wire
     examples): `AUTH_OK|rating`, `ROOM_CREATED|code`,
     `WELCOME|role=WHITE` (greeting on being seated - the CTD brief's own
     name for this; `Seat` the Java enum is unchanged, only the wire text
     was renamed from the old `SEAT WHITE`), `ERROR|reason` (in-game
     rejections use a `SCREAMING_SNAKE_CASE` code - `NOT_YOUR_PIECE`,
-    `VIEWER_CANNOT_PLAY`, `MALFORMED_COMMAND`, `ILLEGAL_MOVE` - matching
-    the brief exactly; auth/room/matchmaking-timeout reasons stay free
-    text). `WAITING` (no payload) and `STATE\n<block>` (a different
-    multi-line shape, encoded by `SnapshotCodec`) are untouched. Board
-    commands aren't parsed by `event.EventMapper` - `EventMapper`'s
+    `VIEWER_CANNOT_PLAY`, `MALFORMED_COMMAND`, `ILLEGAL_MOVE`, `GAME_PAUSED`,
+    `GAME_NOT_OVER` - matching the brief's style; auth/room/matchmaking-
+    timeout reasons stay free text), `OPPONENT_DISCONNECTED|graceSeconds`
+    (sent once, the instant a seated player drops, to the still-connected
+    side and any viewers) and `OPPONENT_RECONNECTED` (no payload, same
+    audience, sent once they're back). `WAITING` (no payload) and
+    `STATE\n<block>` (a different multi-line shape, encoded by
+    `SnapshotCodec`) are untouched. Board commands aren't parsed by
+    `event.EventMapper` - `EventMapper`'s
     `click x y` is pixel-based (see `event.InputMapper`) for the
     stdin/console protocol, a different concern from the already-resolved
     board cell coordinates `BoardWindow`/`GameClient` deal in; `click row
-    col`/`jump row col` are parsed directly by `server.GameSession`.
+    col`/`jump row col`/`rematch` are parsed directly by `server.GameSession`.
   - **Command vs. Event** (the CTD brief's own distinction): a `click`/
     `jump` is a *Command* - rejectable, and always answered with either
     `COMMAND_RESULT|SUCCESS` (parsed, regardless of its effect - a mere
@@ -247,8 +265,8 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     derives all of this by **polling existing public `GameEngine` queries**
     every tick (a `PendingAction` watch-list, resolved in
     `resolvePendingActions()`) rather than adding a new hook into
-    `RealTimeArbiter` - consistent with `forceResign` being the *one*
-    deliberate exception networking made to `gameengine/`. Two documented,
+    `RealTimeArbiter` - consistent with `forceResign`/`abandon` being the
+    only deliberate exceptions networking makes to `gameengine/`. Two documented,
     accepted limitations of this polling approach (see the method's own
     Javadoc): it reads "same color at the destination square", not piece
     identity, so an unrelated same-color move landing on a captured move's
@@ -297,6 +315,12 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     cached (a `volatile` field, read from Swing's event thread, written from
     the WS thread - same pattern `BoardWindow.currentFrame` already uses).
     `waitFor()` is a no-op: the server is the only real clock now.
+    `OPPONENT_DISCONNECTED|<seconds>` stores a `volatile` deadline
+    (`System.currentTimeMillis() + seconds*1000`); `millisUntilOpponentAutoAbandon()`
+    just subtracts "now" from it each time `BoardWindow` asks, so the
+    countdown is purely a function of elapsed wall-clock time - no per-tick
+    server push needed to keep it moving. `OPPONENT_RECONNECTED` resets the
+    deadline back to 0. `requestRematch()` sends `"rematch"`.
   - `LoginDialog` - the sign-in alert (`JOptionPane` + a small form) shown
     by `NetworkGuiMain` first: server address, username, password,
     Login/Register/Cancel.
@@ -328,9 +352,12 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     *before* waiting for a lobby command. If `username` was seated
     (White/Black - never a spectator) in a session it was since
     disconnected from, `GameSession.reconnect(...)` restores that exact
-    seat (cancelling the pending auto-resign task) and re-greets the
-    connection (`WELCOME` + a fresh `STATE`) - silently, with no new protocol
-    message of its own. `client.LobbyDialog.chooseAndWait` checks
+    seat (cancelling the pending auto-abandon task via `cancelAbandonTask`)
+    and re-greets the connection (`WELCOME` + a fresh `STATE`) - silently,
+    with no new protocol message of its own to the reconnecting player, but
+    the *other* seated player (and any viewers) get an explicit
+    `OPPONENT_RECONNECTED` so a client-side "opponent disconnected"
+    countdown (below) knows to clear itself. `client.LobbyDialog.chooseAndWait` checks
     `client.getAssignedSeat() != null` at the very top and returns
     immediately if so, so a reconnected player is never asked to pick
     Quick Play/Room again for a game they're already back in.
@@ -377,15 +404,42 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     command.
   - **Disconnect handling**: `handleDisconnect(connection)` vacates that
     seat and, if it was a real seated player (not a spectator) in an
-    already-two-player game, schedules a **one-shot** forfeit task (default
-    20s, configurable via a constructor param so tests don't need to wait
-    for real) that calls `engine.forceResign(thatColor)`; `forceResign` is
-    idempotent so it's harmless if the game already ended some other way in
-    the meantime. If the same username reconnects first (see `Lobby`'s
+    already-two-player game, schedules a **one-shot** auto-abandon task
+    (default 20s, configurable via a constructor param so tests don't need
+    to wait for real) via `scheduleAutoAbandon` that calls `engine.abandon()`
+    - ends the game with **no winner** (see `GameState.abandon()`/
+    `GameEngine.abandon` above), since a disconnect is nobody's fault and
+    neither side should be credited with a win or charged with a loss for
+    it; `abandon()` is idempotent so it's harmless if the game already ended
+    some other way in the meantime. The still-connected side (and any
+    viewers) are also sent an explicit `OPPONENT_DISCONNECTED|<graceSeconds>`
+    the instant the disconnect happens, so a client can show a **visible
+    countdown** (this used to be explicitly countdown-less; that changed
+    once auto-abandon stopped declaring a winner, since a silent forfeit
+    and a silent no-fault stoppage read very differently to the player
+    still connected). If the same username reconnects first (see `Lobby`'s
     reconnect above), `GameSession.reconnect` cancels that pending
-    `ScheduledFuture` and restores the seat instead - the forfeit never
-    fires. There is deliberately **no visible countdown** anywhere
-    (explicit user instruction) - purely functional.
+    `ScheduledFuture` via `cancelAbandonTask` and restores the seat instead -
+    the abandon never fires.
+  - **Paused while disconnected**: `isPausedForDisconnect()` is true
+    whenever both seats have real usernames but one connection is currently
+    null. While true, `tick()` skips `engine.advanceTime(...)` entirely (the
+    virtual clock freezes - nothing in flight can arrive, nothing rests
+    through), and `handleCommand` rejects every `click`/`jump`/`rematch`
+    with `ERROR|GAME_PAUSED` - the still-connected side gets no free window
+    to act against a defenseless opponent who can't respond.
+  - **Rematch**: either seated player (not a viewer) may send `"rematch"`
+    once `engine.isGameOver()` and neither seat is currently vacated by a
+    disconnect. `GameSession.requestRematch()` simply replaces the `engine`
+    field wholesale with a fresh `GameEngine` over a brand-new standard
+    board/`GameState` (which is why `engine` isn't `final` - see the class
+    Javadoc) rather than adding any in-place reset to `GameEngine` itself -
+    `gameengine/` stays untouched by this feature entirely. Also clears
+    both selections, the pending-action watch-list, and `ratingApplied`, so
+    the next game is scored independently of the one before it. Rejected
+    with `ERROR|GAME_NOT_OVER` if the game is still in progress, or
+    `ERROR|GAME_PAUSED` if a seat is currently vacated (nothing to fairly
+    restart against).
   - **Concurrency**: `GameEngine`/`RealTimeArbiter` are plain,
     non-thread-safe classes by design (every other entry point drives them
     from one thread). Because Java-WebSocket dispatches connection
@@ -394,12 +448,15 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     (and to the two selection fields) through one `synchronized` block.
     Don't add a new path into `engine` from `GameSession` without going
     through that same lock.
-  - The first snapshot to report `gameOver()` (from a real king capture
-    *or* a forced resignation - both flow through the same
-    `GameState.setGameOver`) triggers a one-time ELO update
+  - The first snapshot to report `gameOver()` **with an actual winner**
+    (from a real king capture or a forced resignation - both flow through
+    the same `GameState.setGameOver`) triggers a one-time ELO update
     (`applyRatingChangeIfGameJustEnded`, guarded by a `ratingApplied` flag)
-    via `server.auth.EloCalculator`, persisted through
-    `UserRepository.updateRating`.
+    via the new `server.auth.RatingService` (wraps `EloCalculator` +
+    `UserRepository.updateRating` as one small unit, the same way
+    `AuthCommandParser`/`AuthController` were split out of the auth flow).
+    A game that ends via `abandon()` - no winner - deliberately skips this
+    check entirely: nobody's rating changes when nobody did anything wrong.
   - **server/auth/** - `AuthCommandParser` is the one place that knows the
     raw `"login/register <username> <password>"` wire text shape (mirrors
     `parsing.BoardMapper`/`PieceMapper` being kept separate from the engine
@@ -421,8 +478,11 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     salted SHA-256 - no bcrypt/argon2 dependency, adequate for this
     project's scope; a password is never stored or compared in the clear.
     `EloCalculator` is a pure, stateless standard ELO formula (K=32, no
-    draws - this engine's games always end in a king capture or a
-    resignation, never a tie).
+    draws - a king capture or a resignation always has a winner; an
+    abandoned/no-winner game, above, simply never reaches `EloCalculator`
+    at all rather than being modeled as a draw). `RatingService` is the
+    thin orchestration layer around it described above - computes both new
+    ratings and persists them via `UserRepository.updateRating` as one call.
 - **bus/Bus** - a generic, synchronous in-process pub/sub
   (`subscribe(topic, handler)` / `publish(topic, payload)`).
   `GameSession` publishes each broadcast's White-side `GameSnapshot` on
@@ -439,7 +499,8 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
 
 This is phases 1-3 of a staged brief: pub/sub bus + WebSocket server + 2
 players; SQLite-backed accounts + ELO rating; ELO-ranged quick-match,
-rooms with spectators, disconnect auto-resign, and activity logging. There
+rooms with spectators, disconnect pause/auto-abandon with rematch, and
+activity logging. There
 is no remaining known phase beyond this as of this writing - if the brief
 gains new slides, treat them as a new stage rather than assuming scope
 that isn't in the code.

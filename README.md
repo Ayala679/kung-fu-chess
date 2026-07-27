@@ -84,10 +84,15 @@ board window ever opens:
    and Black; anyone after that joins as a read-only **spectator**.
 3. A quick on-screen 3-2-1, then the board.
 
-If a seated player's connection drops, that side auto-resigns after 20
-seconds (no visible countdown - just a functional forfeit) and ratings
-update normally. Both the server and each client append a plain-text
-activity log (`logs/server.log`, `logs/client-<username>.log`).
+If a seated player's connection drops, the game pauses immediately (the
+clock freezes and the still-connected side can't act - no free window
+against an opponent who can't respond) and shows a live countdown. If they
+reconnect in time, play resumes exactly where it left off. If not - after
+20 seconds - the game ends with **no winner and no rating change**, since a
+dropped connection is nobody's fault. Once a game is over, either player
+can press **R** to start a rematch on a fresh board in the same room. Both
+the server and each client append a plain-text activity log
+(`logs/server.log`, `logs/client-<username>.log`).
 
 ```bash
 # terminal 1 - the server (listens on port 8887 by default)
@@ -99,8 +104,9 @@ java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-j
 
 See [CLAUDE.md](CLAUDE.md) for how the networking layer is wired
 (`bus`/`client`/`server`/`logging` packages) without touching any of the core
-engine classes above (aside from one deliberate, narrow exception -
-`GameEngine.forceResign`, used for the disconnect timeout).
+engine classes above (aside from two deliberate, narrow exceptions -
+`GameEngine.forceResign` and `GameEngine.abandon`, used for the disconnect
+timeout).
 
 ## Package structure
 
@@ -128,11 +134,12 @@ src/
 │   │   ├── KungFuChessServer.java  accepts connections, authenticates, routes lobby commands
 │   │   ├── Lobby.java              the "tournament manager": rooms + ELO matchmaking queue
 │   │   ├── GameSession.java        owns one game's Board/GameEngine + ticker + ratings +
-│   │   │                           spectators + the disconnect auto-resign timer
+│   │   │                           spectators + the disconnect pause/auto-abandon timer + rematch
 │   │   └── auth/
 │   │       ├── UserRepository.java   accounts + ratings, persisted to a SQLite file
 │   │       ├── PasswordHasher.java   salted SHA-256 (passwords are never stored in the clear)
-│   │       └── EloCalculator.java    standard ELO win/loss rating update
+│   │       ├── EloCalculator.java    standard ELO win/loss rating update
+│   │       └── RatingService.java    applies + persists one game's ELO update as one unit
 │   │
 │   ├── logging/      ← append-only timestamped text logs (server + each client)
 │   │   └── ActivityLog.java

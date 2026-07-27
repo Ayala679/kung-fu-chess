@@ -180,10 +180,24 @@ class GameSessionTest {
         assertTrue(reconnected);
         assertEquals(Seat.WHITE, session.seatOf(aliceAgain));
         assertTrue(aliceAgain.sentMessages.stream().anyMatch(m -> m.equals("WELCOME|role=WHITE")));
-        assertFalse(lastStateOf(bob).gameOver(), "the game must not have been auto-resigned once alice reconnected in time");
+        assertFalse(lastStateOf(bob).gameOver(), "the game must not have been auto-abandoned once alice reconnected in time");
+        assertTrue(bob.sentMessages.contains("OPPONENT_RECONNECTED"), "bob should be told alice is back");
     }
 
-    @Test void testFailingToReconnectWithinTheGraceWindowForfeitsTheGame(@TempDir Path tempDir) throws InterruptedException {
+    @Test void testDisconnectNotifiesTheOtherSideWithAGraceCountdown(@TempDir Path tempDir) {
+        GameSession session = newSession(tempDir, 20_000L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+        session.join(alice, "alice", 1200);
+        session.join(bob, "bob", 1200);
+        bob.sentMessages.clear();
+
+        session.handleDisconnect(alice);
+
+        assertTrue(bob.sentMessages.contains("OPPONENT_DISCONNECTED|20"), "bob should be told alice disconnected and given the grace period in seconds");
+    }
+
+    @Test void testFailingToReconnectWithinTheGraceWindowAbandonsTheGameWithNoWinner(@TempDir Path tempDir) throws InterruptedException {
         GameSession session = newSession(tempDir, 200L);
         FakeWebSocket alice = new FakeWebSocket();
         FakeWebSocket bob = new FakeWebSocket();
@@ -194,8 +208,79 @@ class GameSessionTest {
         Thread.sleep(500);
 
         GameSnapshot finalState = lastStateOf(bob);
-        assertTrue(finalState.gameOver(), "the game should be auto-resigned once the grace window elapses without a reconnect");
-        assertEquals("BLACK", finalState.winner(), "bob (still connected) should win by forfeit");
+        assertTrue(finalState.gameOver(), "the game should be auto-abandoned once the grace window elapses without a reconnect");
+        assertNull(finalState.winner(), "a disconnect is nobody's fault - neither side should be credited with a win");
+    }
+
+    @Test void testWhileOpponentIsDisconnectedTheConnectedPlayersMovesAreRejected(@TempDir Path tempDir) {
+        GameSession session = newSession(tempDir, 20_000L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+        session.join(alice, "alice", 1200);
+        session.join(bob, "bob", 1200);
+
+        session.handleDisconnect(alice);
+        bob.sentMessages.clear();
+        session.handleCommand(bob, "click 1 4"); // bob's own black pawn
+
+        assertTrue(bob.sentMessages.contains("ERROR|GAME_PAUSED"), "bob shouldn't get a free window to act while alice can't respond");
+    }
+
+    @Test void testTheClockDoesNotAdvanceWhileAnOpponentIsDisconnected(@TempDir Path tempDir) throws InterruptedException {
+        GameSession session = newSession(tempDir, 20_000L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+        session.join(alice, "alice", 1200);
+        session.join(bob, "bob", 1200);
+
+        session.handleCommand(alice, "click 6 4"); // select e2 pawn
+        session.handleCommand(alice, "click 5 4"); // move to e3 - a 1-cell move, 1000ms
+        session.handleDisconnect(alice);
+
+        Thread.sleep(1200); // past the 1000ms move duration - but the clock should be frozen, not running
+
+        assertTrue(bob.sentMessages.stream().noneMatch(m -> m.equals("EVENT|MOVE_COMPLETED|WHITE|e2|e3")),
+                "the move must not complete while its own mover is disconnected and the clock is paused");
+    }
+
+    @Test void testEitherSeatedPlayerCanRequestARematchOnceTheGameIsOver(@TempDir Path tempDir) throws InterruptedException {
+        GameSession session = newSession(tempDir, 200L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+        session.join(alice, "alice", 1200);
+        session.join(bob, "bob", 1200);
+
+        session.handleDisconnect(alice);
+        Thread.sleep(500); // grace window elapses -> game abandoned, no winner
+
+        assertTrue(lastStateOf(bob).gameOver());
+
+        // alice never reconnected, so the game is still "paused" (a seat is vacant) - rematch should be refused for now
+        bob.sentMessages.clear();
+        session.handleCommand(bob, "rematch");
+        assertTrue(bob.sentMessages.contains("ERROR|GAME_PAUSED"));
+
+        FakeWebSocket aliceAgain = new FakeWebSocket();
+        session.reconnect(aliceAgain, "alice");
+        bob.sentMessages.clear();
+        session.handleCommand(bob, "rematch");
+
+        assertTrue(bob.sentMessages.contains("COMMAND_RESULT|SUCCESS"));
+        GameSnapshot fresh = lastStateOf(bob);
+        assertFalse(fresh.gameOver(), "a fresh board should no longer be game-over");
+    }
+
+    @Test void testRematchIsRefusedWhileTheGameIsStillInProgress(@TempDir Path tempDir) {
+        GameSession session = newSession(tempDir, 20_000L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+        session.join(alice, "alice", 1200);
+        session.join(bob, "bob", 1200);
+        alice.sentMessages.clear();
+
+        session.handleCommand(alice, "rematch");
+
+        assertTrue(alice.sentMessages.contains("ERROR|GAME_NOT_OVER"));
     }
 
     @Test void testReconnectFailsForAUsernameThatWasNeverSeatedHere(@TempDir Path tempDir) {

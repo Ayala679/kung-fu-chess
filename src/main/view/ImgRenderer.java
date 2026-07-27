@@ -216,14 +216,14 @@ public class ImgRenderer {
     }
 
     private void drawGameOverBanner(Img frame, String winner, int boardWidthPx, int boardHeightPx) {
-        if (winner == null) return;
-
         // Img has no pixel-filter/blur capability, so this dims the board area
         // instead of a true blur - the closest approximation drawOn alone allows.
         new Img().read(DIM_OVERLAY_ASSET, new Dimension(boardWidthPx, boardHeightPx), false, null)
                 .drawOn(frame, BOARD_OFFSET_X, BOARD_OFFSET_Y);
 
-        String message = "Game over, " + capitalize(winner) + " Won";
+        // winner == null means the game ended with no winner (e.g. abandoned
+        // after a disconnect timeout) - see model.GameState.abandon().
+        String message = winner == null ? "Game abandoned - no winner" : "Game over, " + capitalize(winner) + " Won";
         int canvasWidth = frame.get().getWidth();
         int canvasHeight = frame.get().getHeight();
         float fontSize = 2.4f;
@@ -235,6 +235,23 @@ public class ImgRenderer {
         int y = canvasHeight / 2;
 
         frame.putText(message, x, y, fontSize, new Color(255, 215, 0), 0);
+    }
+
+    /**
+     * Live overlay shown while a network opponent is disconnected, counting
+     * down to when the game will be auto-abandoned if they don't reconnect.
+     * Called by BoardWindow, separately from render(), since GameSnapshot
+     * itself has no concept of network disconnects - see event.GameClient's
+     * millisUntilOpponentAutoAbandon().
+     */
+    public void drawDisconnectCountdown(Img frame, long millisRemaining) {
+        long secondsRemaining = Math.max(0, (millisRemaining + 999) / 1000);
+        String message = "Opponent disconnected - abandoning in " + secondsRemaining + "s";
+        int canvasWidth = frame.get().getWidth();
+        float fontSize = 1.6f;
+        int approxTextWidth = (int) (message.length() * fontSize * 12 * 0.55);
+        int x = (canvasWidth - approxTextWidth) / 2;
+        frame.putText(message, x, 90, fontSize, new Color(200, 60, 60), 0);
     }
 
     private static String capitalize(String s) {

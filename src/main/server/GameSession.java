@@ -21,7 +21,7 @@ import model.GameState;
 import model.Piece;
 import model.Position;
 import parsing.BoardMapper;
-import server.auth.EloCalculator;
+import server.auth.RatingService;
 import server.auth.UserRepository;
 import snapshot.GameSnapshot;
 import snapshot.MoveNotation;
@@ -53,16 +53,29 @@ import snapshot.MoveNotation;
  * dispatches connection callbacks on its own threads, concurrently with this
  * session's ticker/disconnect-timer thread, so every access to {@code
  * engine} (and to the two selection fields) is serialized through
- * {@code lock}.
+ * {@code lock}. {@code engine} itself is reassigned wholesale on a
+ * successful rematch request (see {@link #requestRematch()}) rather than
+ * reset in place, which is why it isn't {@code final}.
+ *
+ * While either seat is vacated by a disconnect (see {@link
+ * #isPausedForDisconnect()}), the virtual clock is frozen and both click/jump
+ * requests are rejected with {@code ERROR|GAME_PAUSED} - the still-connected
+ * side gets no free window to act against an opponent who can't respond. If
+ * the grace period elapses without a reconnect, the game ends with no
+ * winner and no rating change (see {@link #scheduleAutoAbandon}) - a
+ * disconnect is nobody's fault, so nobody is credited with a win or charged
+ * with a loss for it.
  */
 public class GameSession {
     private static final long TICK_MS = 16;
-    private static final long DEFAULT_DISCONNECT_RESIGN_MILLIS = 20_000L;
+    private static final long DEFAULT_DISCONNECT_GRACE_MILLIS = 20_000L;
 
     private static final String ERROR_VIEWER_CANNOT_PLAY = "VIEWER_CANNOT_PLAY";
     private static final String ERROR_NOT_YOUR_PIECE = "NOT_YOUR_PIECE";
     private static final String ERROR_MALFORMED_COMMAND = "MALFORMED_COMMAND";
     private static final String ERROR_ILLEGAL_MOVE = "ILLEGAL_MOVE";
+    private static final String ERROR_GAME_PAUSED = "GAME_PAUSED";
+    private static final String ERROR_GAME_NOT_OVER = "GAME_NOT_OVER";
 
     /** What kind of action a {@link PendingAction} is watching for completion. */
     private enum ActionKind { MOVE, JUMP }
@@ -104,10 +117,10 @@ public class GameSession {
     private final Bus bus;
     private final String roomCode;
     private final String snapshotTopic;
-    private final GameEngine engine;
-    private final UserRepository userRepository;
+    private GameEngine engine;
+    private final RatingService ratingService;
     private final ActivityLog activityLog;
-    private final long disconnectResignDelayMillis;
+    private final long disconnectGraceMillis;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "game-session-" + Integer.toHexString(hashCode()));
         t.setDaemon(true);
@@ -127,30 +140,33 @@ public class GameSession {
     private int whiteRating;
     private int blackRating;
     private boolean ratingApplied = false;
-    private ScheduledFuture<?> whiteResignTask;
-    private ScheduledFuture<?> blackResignTask;
+    private ScheduledFuture<?> whiteAbandonTask;
+    private ScheduledFuture<?> blackAbandonTask;
 
     public GameSession(Bus bus, String roomCode, UserRepository userRepository, ActivityLog activityLog) {
-        this(bus, roomCode, userRepository, activityLog, DEFAULT_DISCONNECT_RESIGN_MILLIS);
+        this(bus, roomCode, userRepository, activityLog, DEFAULT_DISCONNECT_GRACE_MILLIS);
     }
 
     /**
-     * Same as the 4-arg constructor, with the disconnect-&gt;forfeit grace
+     * Same as the 4-arg constructor, with the disconnect-&gt;abandon grace
      * period given explicitly instead of the default 20 seconds - so tests
      * can use a short, real (wall-clock) delay instead of actually waiting
-     * 20 seconds for {@link #handleDisconnect}'s forfeit timer.
+     * 20 seconds for {@link #handleDisconnect}'s abandon timer.
      */
     public GameSession(Bus bus, String roomCode, UserRepository userRepository, ActivityLog activityLog,
-                        long disconnectResignDelayMillis) {
+                        long disconnectGraceMillis) {
         this.bus = bus;
         this.roomCode = roomCode;
         this.snapshotTopic = "room." + roomCode + ".snapshot";
-        this.userRepository = userRepository;
+        this.ratingService = new RatingService(userRepository);
         this.activityLog = activityLog;
-        this.disconnectResignDelayMillis = disconnectResignDelayMillis;
+        this.disconnectGraceMillis = disconnectGraceMillis;
+        this.engine = newStandardGameEngine();
+    }
+
+    private static GameEngine newStandardGameEngine() {
         Board board = BoardMapper.readBoard(new Scanner(STANDARD_BOARD));
-        GameState gameState = new GameState();
-        this.engine = new GameEngine(board, gameState);
+        return new GameEngine(board, new GameState());
     }
 
     public String getRoomCode() {
@@ -214,10 +230,12 @@ public class GameSession {
         scheduler.scheduleAtFixedRate(this::tick, TICK_MS, TICK_MS, TimeUnit.MILLISECONDS);
     }
 
-    // Runs every TICK_MS on the scheduler thread. Calls engine.advanceTime, then resolvePendingActions, then broadcastSnapshot.
+    // Runs every TICK_MS on the scheduler thread. Calls engine.advanceTime (skipped while isPausedForDisconnect()), then resolvePendingActions, then broadcastSnapshot.
     private void tick() {
         synchronized (lock) {
-            engine.advanceTime(TICK_MS);
+            if (!isPausedForDisconnect()) {
+                engine.advanceTime(TICK_MS);
+            }
         }
         resolvePendingActions();
         broadcastSnapshot();
@@ -235,6 +253,12 @@ public class GameSession {
      */
     public void handleCommand(WebSocket connection, String command) {
         String[] parts = command.trim().split("\\s+");
+
+        if (parts.length >= 1 && parts[0].equals(Protocol.REMATCH)) {
+            handleRematchCommand(connection);
+            return;
+        }
+
         Integer row = parts.length >= 2 ? tryParseInt(parts[1]) : null;
         Integer col = parts.length >= 3 ? tryParseInt(parts[2]) : null;
         if (parts.length < 3 || !isKnownVerb(parts[0]) || row == null || col == null) {
@@ -246,6 +270,10 @@ public class GameSession {
         if (seat == null) return;
         if (!seat.isPlayer()) {
             send(connection, Protocol.ERROR + "|" + ERROR_VIEWER_CANNOT_PLAY);
+            return;
+        }
+        if (isPausedForDisconnect()) {
+            send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
             return;
         }
         Piece.Color color = seat.toColor();
@@ -283,6 +311,52 @@ public class GameSession {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /**
+     * "rematch" - either seated player (not a viewer) may request a fresh
+     * board once the current game is over. Rejected while a viewer sent it,
+     * while the game isn't actually over yet, or while the other seat is
+     * currently vacated by a disconnect (nobody to fairly restart against).
+     */
+    private void handleRematchCommand(WebSocket connection) {
+        Seat seat = seatOf(connection);
+        if (seat == null) return;
+        if (!seat.isPlayer()) {
+            send(connection, Protocol.ERROR + "|" + ERROR_VIEWER_CANNOT_PLAY);
+            return;
+        }
+        if (isPausedForDisconnect()) {
+            send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
+            return;
+        }
+        if (!requestRematch()) {
+            send(connection, Protocol.ERROR + "|" + ERROR_GAME_NOT_OVER);
+            return;
+        }
+        send(connection, Protocol.COMMAND_RESULT + "|SUCCESS");
+        activityLog.log("room=" + roomCode + " rematch requested by " + seat);
+        broadcastSnapshot();
+    }
+
+    /** Replaces engine with a fresh standard board, if the current game is actually over. Returns false otherwise. */
+    private boolean requestRematch() {
+        synchronized (lock) {
+            if (!engine.isGameOver()) return false;
+            engine = newStandardGameEngine();
+            engine.setPlayerNames(whiteUsername, blackUsername);
+            whiteSelection = null;
+            blackSelection = null;
+            pendingActions.clear();
+            ratingApplied = false;
+            return true;
+        }
+    }
+
+    /** True once both seats are filled with real players and one of them is currently disconnected - clicks/jumps/rematch are rejected and the clock is frozen until they reconnect or the abandon timer fires. */
+    private boolean isPausedForDisconnect() {
+        return whiteUsername != null && blackUsername != null
+                && (whiteConnection == null || blackConnection == null);
     }
 
     /**
@@ -331,8 +405,8 @@ public class GameSession {
     /**
      * Resolves every watched move/jump by polling existing public
      * GameEngine queries (no new hook into RealTimeArbiter - see CLAUDE.md's
-     * note on gameengine.GameEngine.forceResign being the one deliberate
-     * exception networking made to that package). An action resolves once
+     * note on gameengine.GameEngine.forceResign/abandon being the deliberate
+     * exceptions networking makes to that package). An action resolves once
      * its origin square is no longer "departing"
      * ({@code engine.isAlreadyMoving} goes false):
      *   - a JUMP always resolves COMPLETED - once a jump legitimately
@@ -408,22 +482,42 @@ public class GameSession {
 
     /**
      * A connection dropped. A seated player's seat is vacated and, if a real
-     * two-player game was in progress, a one-shot forfeit timer starts
-     * (see {@link #disconnectResignDelayMillis}) - cancelled by
-     * {@link #reconnect} if the same username comes back in time. A viewer
-     * is just removed from the broadcast list (no reconnection concept for
+     * two-player game was in progress, a one-shot auto-abandon timer starts
+     * (see {@link #disconnectGraceMillis}) and the other seated player (plus
+     * any viewers) is told about it via OPPONENT_DISCONNECTED - cancelled by
+     * {@link #reconnect} if the same username comes back in time. Moves are
+     * also rejected and the clock frozen for as long as this seat stays
+     * vacated - see {@link #isPausedForDisconnect()}. A viewer is just
+     * removed from the broadcast list (no reconnection concept for
      * spectators - rejoining the room via a fresh join_room is enough).
      */
     public void handleDisconnect(WebSocket connection) {
         if (connection == whiteConnection) {
             whiteConnection = null;
-            whiteResignTask = scheduleForcedResign(Piece.Color.WHITE);
+            whiteAbandonTask = scheduleAutoAbandon(Piece.Color.WHITE);
+            if (whiteAbandonTask != null) notifyOpponentOfDisconnect(Piece.Color.WHITE);
         } else if (connection == blackConnection) {
             blackConnection = null;
-            blackResignTask = scheduleForcedResign(Piece.Color.BLACK);
+            blackAbandonTask = scheduleAutoAbandon(Piece.Color.BLACK);
+            if (blackAbandonTask != null) notifyOpponentOfDisconnect(Piece.Color.BLACK);
         } else {
             viewers.remove(connection);
         }
+    }
+
+    /** Tells the still-connected side (and any viewers) that {@code disconnectedColor} just dropped, and how long they have before the game is auto-abandoned. */
+    private void notifyOpponentOfDisconnect(Piece.Color disconnectedColor) {
+        String message = Protocol.OPPONENT_DISCONNECTED + "|" + (disconnectGraceMillis / 1000);
+        WebSocket other = disconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        send(other, message);
+        for (WebSocket viewer : viewers) send(viewer, message);
+    }
+
+    /** Tells the still-connected side (and any viewers) that {@code reconnectedColor} is back. */
+    private void notifyOpponentOfReconnect(Piece.Color reconnectedColor) {
+        WebSocket other = reconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        send(other, Protocol.OPPONENT_RECONNECTED);
+        for (WebSocket viewer : viewers) send(viewer, Protocol.OPPONENT_RECONNECTED);
     }
 
     /**
@@ -439,44 +533,46 @@ public class GameSession {
     public synchronized boolean reconnect(WebSocket connection, String username) {
         if (username.equals(whiteUsername) && whiteConnection == null) {
             whiteConnection = connection;
-            cancelResignTask(Piece.Color.WHITE);
+            cancelAbandonTask(Piece.Color.WHITE);
             activityLog.log("room=" + roomCode + " " + username + " reconnected as WHITE");
             greet(connection, Seat.WHITE);
+            notifyOpponentOfReconnect(Piece.Color.WHITE);
             return true;
         }
         if (username.equals(blackUsername) && blackConnection == null) {
             blackConnection = connection;
-            cancelResignTask(Piece.Color.BLACK);
+            cancelAbandonTask(Piece.Color.BLACK);
             activityLog.log("room=" + roomCode + " " + username + " reconnected as BLACK");
             greet(connection, Seat.BLACK);
+            notifyOpponentOfReconnect(Piece.Color.BLACK);
             return true;
         }
         return false;
     }
 
-    // Cancels a pending scheduleForcedResign task for one color, if any (called by reconnect).
-    private void cancelResignTask(Piece.Color color) {
+    // Cancels a pending scheduleAutoAbandon task for one color, if any (called by reconnect).
+    private void cancelAbandonTask(Piece.Color color) {
         if (color == Piece.Color.WHITE) {
-            if (whiteResignTask != null) whiteResignTask.cancel(false);
-            whiteResignTask = null;
+            if (whiteAbandonTask != null) whiteAbandonTask.cancel(false);
+            whiteAbandonTask = null;
         } else {
-            if (blackResignTask != null) blackResignTask.cancel(false);
-            blackResignTask = null;
+            if (blackAbandonTask != null) blackAbandonTask.cancel(false);
+            blackAbandonTask = null;
         }
     }
 
-    // Schedules a one-shot auto-resign for disconnectedColor after disconnectResignDelayMillis; calls engine.forceResign when it fires. Cancelled by cancelResignTask on reconnect.
-    private ScheduledFuture<?> scheduleForcedResign(Piece.Color disconnectedColor) {
+    // Schedules a one-shot auto-abandon (game over, no winner) for disconnectedColor after disconnectGraceMillis; calls engine.abandon() when it fires. Cancelled by cancelAbandonTask on reconnect.
+    private ScheduledFuture<?> scheduleAutoAbandon(Piece.Color disconnectedColor) {
         if (whiteUsername == null || blackUsername == null) return null; // never became a real 2-player game
-        activityLog.log("room=" + roomCode + " " + disconnectedColor + " disconnected - auto-resign in "
-                + disconnectResignDelayMillis + "ms if not reconnected");
+        activityLog.log("room=" + roomCode + " " + disconnectedColor + " disconnected - auto-abandon in "
+                + disconnectGraceMillis + "ms if not reconnected");
         return scheduler.schedule(() -> {
             synchronized (lock) {
-                engine.forceResign(disconnectedColor);
+                engine.abandon();
             }
-            activityLog.log("room=" + roomCode + " " + disconnectedColor + " auto-resigned (disconnect timeout)");
+            activityLog.log("room=" + roomCode + " game abandoned (disconnect timeout, no winner, no rating change)");
             broadcastSnapshot();
-        }, disconnectResignDelayMillis, TimeUnit.MILLISECONDS);
+        }, disconnectGraceMillis, TimeUnit.MILLISECONDS);
     }
 
     // Sends a fresh STATE to White, Black and every viewer; also publishes to bus and calls applyRatingChangeIfGameJustEnded.
@@ -514,15 +610,16 @@ public class GameSession {
     }
 
     /**
-     * The first snapshot to report the game as over updates both accounts'
-     * ratings via a standard ELO exchange (see server.auth.EloCalculator) and
-     * persists them (see server.auth.UserRepository) - guarded by
+     * The first snapshot to report the game as over - with an actual winner -
+     * updates both accounts' ratings via {@link RatingService} - guarded by
      * {@code ratingApplied} so a win is only ever scored once, no matter how
-     * many more snapshots go out afterward (including one from the
-     * disconnect auto-resign timer).
+     * many more snapshots go out afterward. A game that ended with no winner
+     * (abandoned after a disconnect timeout - see {@link #scheduleAutoAbandon})
+     * intentionally skips this entirely: nobody's rating changes, since
+     * neither side did anything to deserve a loss.
      */
     private void applyRatingChangeIfGameJustEnded(GameSnapshot snapshot) {
-        if (!snapshot.gameOver() || ratingApplied) return;
+        if (!snapshot.gameOver() || snapshot.winner() == null || ratingApplied) return;
         if (whiteUsername == null || blackUsername == null) return;
         ratingApplied = true;
 
@@ -532,12 +629,9 @@ public class GameSession {
         int winnerRating = whiteWon ? whiteRating : blackRating;
         int loserRating = whiteWon ? blackRating : whiteRating;
 
-        int newWinnerRating = EloCalculator.winnerNewRating(winnerRating, loserRating);
-        int newLoserRating = EloCalculator.loserNewRating(loserRating, winnerRating);
-        userRepository.updateRating(winnerName, newWinnerRating);
-        userRepository.updateRating(loserName, newLoserRating);
-        activityLog.log("room=" + roomCode + " GAME_OVER " + winnerName + " (" + winnerRating + " -> " + newWinnerRating
-                + ") beat " + loserName + " (" + loserRating + " -> " + newLoserRating + ")");
+        RatingService.Outcome outcome = ratingService.applyGameEnd(winnerName, winnerRating, loserName, loserRating);
+        activityLog.log("room=" + roomCode + " GAME_OVER " + winnerName + " (" + winnerRating + " -> " + outcome.newWinnerRating
+                + ") beat " + loserName + " (" + loserRating + " -> " + outcome.newLoserRating + ")");
     }
 
     private void send(WebSocket connection, String message) {

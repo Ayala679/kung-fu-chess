@@ -43,6 +43,8 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
     private volatile GameSnapshot latestSnapshot;
     private volatile LobbyListener lobbyListener;
     private volatile ActivityLog activityLog;
+    /** Epoch millis when the opponent will be auto-abandoned, or 0 if they aren't currently disconnected. */
+    private volatile long opponentAbandonDeadline;
 
     public NetworkGameClient(URI serverUri) {
         super(serverUri);
@@ -135,6 +137,17 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
     }
 
     @Override
+    public long millisUntilOpponentAutoAbandon() {
+        long deadline = opponentAbandonDeadline;
+        return deadline <= 0 ? 0 : deadline - System.currentTimeMillis();
+    }
+
+    @Override
+    public void requestRematch() {
+        send(Protocol.REMATCH);
+    }
+
+    @Override
     public void onOpen(ServerHandshake handshakedata) {
         // login/register is sent explicitly once the socket is open - see authenticate()
     }
@@ -174,6 +187,13 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
             if (block.startsWith("\n")) block = block.substring(1);
             latestSnapshot = SnapshotCodec.decode(block);
             firstSnapshot.countDown();
+        } else if (message.startsWith(Protocol.OPPONENT_DISCONNECTED + "|")) {
+            long graceSeconds = Long.parseLong(message.substring((Protocol.OPPONENT_DISCONNECTED + "|").length()).trim());
+            opponentAbandonDeadline = System.currentTimeMillis() + graceSeconds * 1000;
+            activityLog.log("opponent disconnected, auto-abandon in " + graceSeconds + "s if not reconnected");
+        } else if (message.equals(Protocol.OPPONENT_RECONNECTED)) {
+            opponentAbandonDeadline = 0;
+            activityLog.log("opponent reconnected");
         }
     }
 

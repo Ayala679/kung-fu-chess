@@ -172,6 +172,18 @@ public class GameEngine {
         gameState.setGameOver(winner);
     }
 
+    /**
+     * Ends the game immediately with no winner - used when neither side can
+     * fairly be credited with a win (e.g. a network disconnect that leaves
+     * the game unresolved through no fault of either player). Idempotent,
+     * like forceResign. A second deliberate exception networking makes to
+     * this package, alongside forceResign - see CLAUDE.md.
+     */
+    public void abandon() {
+        if (gameState.isGameOver()) return;
+        gameState.abandon();
+    }
+
     /** Advance virtual time and settle any arrivals. */
     public void advanceTime(long ms) {
         if (gameState.isGameOver()) return;

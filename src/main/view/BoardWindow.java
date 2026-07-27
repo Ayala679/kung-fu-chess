@@ -2,6 +2,8 @@ package view;
 
 import java.awt.Dimension;
 import java.awt.Graphics;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
@@ -79,6 +81,17 @@ public class BoardWindow {
             }
         });
 
+        // 'R' once the game is over requests a rematch - a no-op in offline play (see GameClient.requestRematch()).
+        panel.setFocusable(true);
+        panel.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_R && eventEngine.snapshot().gameOver()) {
+                    eventEngine.requestRematch();
+                }
+            }
+        });
+
         new Timer(TICK_MS, e -> {
             eventEngine.waitFor(TICK_MS);
             refresh();
@@ -86,7 +99,12 @@ public class BoardWindow {
     }
 
     private void refresh() {
-        currentFrame = renderer.render(eventEngine.snapshot()).get();
+        Img frame = renderer.render(eventEngine.snapshot());
+        long remainingMs = eventEngine.millisUntilOpponentAutoAbandon();
+        if (remainingMs > 0) {
+            renderer.drawDisconnectCountdown(frame, remainingMs);
+        }
+        currentFrame = frame.get();
         panel.repaint();
     }
 
@@ -102,5 +120,6 @@ public class BoardWindow {
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
+        panel.requestFocusInWindow(); // so the 'R' (rematch) key listener actually receives key events
     }
 }

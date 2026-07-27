@@ -32,6 +32,9 @@ public final class Protocol {
     /** Client -> server, sent once authenticated: {@code "join_room <code>"} - seated Black, or a VIEWER if already full. */
     public static final String JOIN_ROOM = "join_room";
 
+    /** Client -> server, sent by either seated player once the game is over: requests a fresh rematch in the same room. */
+    public static final String REMATCH = "rematch";
+
     /** Server -> client, still waiting for an opponent (quick-match or an empty room seat). No payload. */
     public static final String WAITING = "WAITING";
 
@@ -60,4 +63,10 @@ public final class Protocol {
 
     /** Server -> client, one full board snapshot: {@code "STATE\n" + SnapshotCodec.encode(...)}. */
     public static final String STATE = "STATE";
+
+    /** Server -> client (to the still-connected side and any viewers), a seated player just disconnected: {@code "OPPONENT_DISCONNECTED|<graceSeconds>"}. */
+    public static final String OPPONENT_DISCONNECTED = "OPPONENT_DISCONNECTED";
+
+    /** Server -> client (to the still-connected side and any viewers), a previously-disconnected player reconnected in time. No payload. */
+    public static final String OPPONENT_RECONNECTED = "OPPONENT_RECONNECTED";
 }
