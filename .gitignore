@@ -44,3 +44,6 @@ data/
 
 ### Activity logs (server + client, created on first run - logging.ActivityLog) ###
 logs/
+
+### Local secrets for docker-compose.yml (see .env.example) - never commit real credentials ###
+.env
