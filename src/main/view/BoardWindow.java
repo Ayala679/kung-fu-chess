@@ -2,6 +2,7 @@ package view;
 
 import java.awt.Dimension;
 import java.awt.Graphics;
+import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -44,7 +45,8 @@ public class BoardWindow {
             @Override
             protected void paintComponent(Graphics g) {
                 super.paintComponent(g);
-                g.drawImage(currentFrame, 0, 0, getWidth(), getHeight(), null);
+                Rectangle dest = letterboxRect(getWidth(), getHeight());
+                g.drawImage(currentFrame, dest.x, dest.y, dest.width, dest.height, null);
             }
         };
         panel.setPreferredSize(new Dimension(currentFrame.getWidth(), currentFrame.getHeight()));
@@ -55,15 +57,20 @@ public class BoardWindow {
                 // fire if the mouse drifts even slightly between press and
                 // release, which was dropping clicks intermittently.
 
-                // paintComponent scales currentFrame to fit the panel's actual
-                // size (getWidth()/getHeight()), which isn't always exactly the
-                // canvas's own pixel size (e.g. if the window got constrained to
-                // fit the screen) - so the click has to be scaled back the same
-                // way before it means anything in image-pixel terms.
-                double scaleX = currentFrame.getWidth() / (double) panel.getWidth();
-                double scaleY = currentFrame.getHeight() / (double) panel.getHeight();
-                int imageX = (int) (e.getX() * scaleX);
-                int imageY = (int) (e.getY() * scaleY);
+                // paintComponent fits currentFrame into the panel's actual size
+                // (getWidth()/getHeight()) preserving its aspect ratio - see
+                // letterboxRect - rather than stretching it to exactly fill an
+                // arbitrarily-resized window (which distorted the board/tables
+                // into ovals/rectangles whenever the window wasn't at the
+                // image's own 1342x1080-ish proportions). The click has to be
+                // mapped back through that same letterboxed rectangle, not a
+                // plain per-axis scale, or clicks would land on the wrong cell
+                // everywhere the window doesn't match the image's aspect ratio.
+                Rectangle dest = letterboxRect(panel.getWidth(), panel.getHeight());
+                if (!dest.contains(e.getPoint())) return; // click landed in a letterbox bar, not on the image at all
+                double scale = currentFrame.getWidth() / (double) dest.width;
+                int imageX = (int) ((e.getX() - dest.x) * scale);
+                int imageY = (int) ((e.getY() - dest.y) * scale);
 
                 int boardX = imageX - ImgRenderer.BOARD_OFFSET_X;
                 int boardY = imageY - ImgRenderer.BOARD_OFFSET_Y;
@@ -106,6 +113,23 @@ public class BoardWindow {
         }
         currentFrame = frame.get();
         panel.repaint();
+    }
+
+    /** The largest rectangle of currentFrame's own aspect ratio that fits within (availableWidth, availableHeight), centered - so the board/tables scale evenly instead of stretching into an arbitrary window shape. */
+    private Rectangle letterboxRect(int availableWidth, int availableHeight) {
+        if (availableWidth <= 0 || availableHeight <= 0) return new Rectangle(0, 0, 0, 0);
+        double imageAspect = currentFrame.getWidth() / (double) currentFrame.getHeight();
+        double availableAspect = availableWidth / (double) availableHeight;
+        int width;
+        int height;
+        if (availableAspect > imageAspect) {
+            height = availableHeight;
+            width = (int) Math.round(height * imageAspect);
+        } else {
+            width = availableWidth;
+            height = (int) Math.round(width / imageAspect);
+        }
+        return new Rectangle((availableWidth - width) / 2, (availableHeight - height) / 2, width, height);
     }
 
     public void show() {

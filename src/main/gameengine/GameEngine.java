@@ -136,7 +136,21 @@ public class GameEngine {
         return true;
     }
 
-    /** Request to "jump" the piece on a cell in place (Kung-Fu Chess mechanic). Returns true iff the jump actually started (false if rejected, or if it was too late and the piece was captured instead). */
+    /**
+     * Request to "jump" the piece on a cell in place (Kung-Fu Chess
+     * mechanic). Returns true iff the jump actually started (false if
+     * rejected outright - no piece there, already moving, or still
+     * resting). A jump always gets to run its full course once started,
+     * regardless of how "early" it looks relative to some enemy slide
+     * already in flight - whether it actually ends up airborne at the
+     * right moment (and so successfully dodges) is resolved later, for
+     * real, in RealTimeArbiter.update() (see isProtectedByAnInProgressJump)
+     * - not guessed at here. A jump thrown hopelessly early just lands
+     * normally and becomes an ordinary, capturable occupant again well
+     * before the attack arrives - which leaves real room for a second,
+     * better-timed jump before the attacker actually gets there, instead of
+     * being an unrecoverable mistake the instant it's requested.
+     */
     public boolean requestJump(int row, int col) {
         if (gameState.isGameOver()) return false;
         if (!inBounds(row, col)) return false;
@@ -147,16 +161,9 @@ public class GameEngine {
         if (arbiter.isAlreadyMoving(row, col)) return false;
         if (arbiter.isResting(row, col)) return false;
 
-        boolean started;
-        if (arbiter.isTooLateToJump(row, col, piece)) {
-            arbiter.capture(row, col, piece);
-            started = false;
-        } else {
-            arbiter.startJump(piece, new Position(row, col), GameConfig.JUMP_DURATION);
-            started = true;
-        }
+        arbiter.startJump(piece, new Position(row, col), GameConfig.JUMP_DURATION);
         refreshTime();
-        return started;
+        return true;
     }
 
     /**

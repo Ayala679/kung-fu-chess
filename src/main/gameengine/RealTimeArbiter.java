@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import config.GameConfig;
 import model.Board;
 import model.GameState;
 import model.MovingPiece;
@@ -98,8 +97,8 @@ public class RealTimeArbiter {
     /**
      * Is the piece sitting at this cell already mid-move on its own (sliding
      * away, or already mid-jump)? Unlike {@link #isBusyAt}, this ignores other
-     * pieces merely heading toward this cell - that case is a jump/defense
-     * question for {@link #isTooLateToJump}, not a "already has a command" one.
+     * pieces merely heading toward this cell - a jump is never rejected just
+     * because some enemy slide is already inbound; see GameEngine.requestJump.
      */
     public boolean isAlreadyMoving(int row, int col) {
         long now = gameState.getCurrentTime();
@@ -131,37 +130,6 @@ public class RealTimeArbiter {
         } else {
             whiteScore += victim.materialValue();
         }
-    }
-
-    /**
-     * Is it too late to jump out of this cell? A jump only helps if it's
-     * still genuinely in the air - not yet landed - at the moment the
-     * incoming enemy slide actually arrives: landing back down onto the
-     * attacker afterward is what captures it (see {@link
-     * #resolveJumpLanding}). So if a jump started right now would already
-     * be over (landed) before that slide gets here, jumping wouldn't help
-     * at all - the piece would just be sitting there again, normally, when
-     * the attack lands - so it's captured immediately instead of animating
-     * a pointless jump. A tie (the jump would land at exactly the
-     * attacker's own arrival) still counts as "in time" - ties go to the
-     * defender, matching {@link #isProtectedByAnInProgressJump}; otherwise a
-     * same-duration race (e.g. any adjacent capture, where a 1-cell slide
-     * and JUMP_DURATION could tie) would always kill the defender,
-     * regardless of reaction time.
-     */
-    public boolean isTooLateToJump(int row, int col, Piece piece) {
-        long jumpFinish = gameState.getCurrentTime() + GameConfig.JUMP_DURATION;
-        for (MovingPiece active : activeMoves) {
-            if (active.isMoving()) {
-                Position to = active.getTo();
-                if (to.getRow() == row && to.getCol() == col
-                        && active.getPiece().getColor() != piece.getColor()
-                        && jumpFinish < active.getArrivalTime()) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     /**

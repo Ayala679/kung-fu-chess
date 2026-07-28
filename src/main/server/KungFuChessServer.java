@@ -105,11 +105,28 @@ public class KungFuChessServer extends WebSocketServer {
 
         GameSession session = lobby.sessionOf(conn);
         if (session != null) {
-            session.handleCommand(conn, message);
-            return;
+            // "rematch"/click/jump still belong to this session (rematch is
+            // exactly how a finished game gets replayed) - but "play"/
+            // "join_room" mean this connection wants a genuinely different
+            // game, which this old, already-over session can't offer (its
+            // handleCommand only knows rematch/click/jump - anything else
+            // would otherwise come back as a confusing MALFORMED_COMMAND).
+            // Leave it first so the normal lobby flow below can actually
+            // seat them somewhere new.
+            if (session.isGameOver() && isLobbyCommand(message)) {
+                lobby.leaveFinishedSessionIfAny(conn);
+            } else {
+                session.handleCommand(conn, message);
+                return;
+            }
         }
 
         handleLobbyCommand(conn, message);
+    }
+
+    private static boolean isLobbyCommand(String message) {
+        String verb = message.trim().split("\\s+", 2)[0];
+        return verb.equals(Protocol.PLAY) || verb.equals(Protocol.JOIN_ROOM);
     }
 
     // Parses "attach <token>" (token minted by the REST login/register endpoints, see HttpApiServer), replies AUTH_OK/ERROR, then calls lobby.tryReconnect on success.

@@ -141,14 +141,23 @@ stdin ─▶ BoardController ─▶ EventDispatcher ─▶ EventEngine ─▶ Ga
     - **Jump-vs-slide dodge race**: a jump only defends if it's still
       genuinely airborne - not yet landed - at the exact moment the
       incoming enemy slide arrives; landing back down *onto* the attacker
-      afterward is what captures it (`isTooLateToJump` gates this at
-      request time - too late means the jump would already be over before
-      the slide gets there, so it's rejected outright with an immediate
-      capture instead of animating a pointless jump; `isProtectedByAnInProgressJump`
-      re-checks it at the attacker's actual arrival, since real time
-      advances in small increments and a jump legitimately still in the
-      air a moment ago may have already landed by the tick that matters -
-      ties go to the defender in both places). `update()` resolves every
+      afterward is what captures it. `GameEngine.requestJump` never rejects
+      a jump just because it looks "too early" against some enemy slide
+      already in flight - it always starts and runs its full course; a jump
+      thrown hopelessly early simply lands and rests normally, becoming an
+      ordinary, capturable occupant well before that attack arrives, which
+      leaves real room for a *second*, better-timed jump before the
+      attacker actually gets there (see `GameEngineTest.testEarlyJumpLeavesRoomForAWellTimedSecondJumpThatSurvives`
+      - an earlier version of this method special-cased "too early" into an
+      immediate, unrecoverable capture at request time via a since-removed
+      `isTooLateToJump` - a real reported bug: it denied any second chance,
+      even with plenty of real time left to react again; don't reintroduce
+      that shortcut). Whether a jump actually dodges is instead resolved
+      only for real, at arrival time, by `isProtectedByAnInProgressJump` -
+      since real time advances in small increments, a jump legitimately
+      still in the air a moment ago may have already landed by the tick
+      that matters; ties (the jump lands at the *same* instant the attacker
+      arrives) go to the defender. `update()` resolves every
       arrival in one single, strictly chronological pass (ties: slides
       before jump landings, so a jump landing at the *same* instant an
       attacker arrives can still catch it) - an attacker landing on a

@@ -27,6 +27,12 @@ class LobbyTest {
         return new Lobby(new Bus(), userRepository, activityLog, timeoutSeconds);
     }
 
+    private static Lobby newLobbyWithShortDisconnectGrace(Path tempDir, long disconnectGraceMillis) {
+        UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
+        ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
+        return new Lobby(new Bus(), userRepository, activityLog, 60_000L, disconnectGraceMillis);
+    }
+
     @Test void testPlayQueuesWhenNoOneIsWaiting(@TempDir Path tempDir) {
         Lobby lobby = newLobby(tempDir);
         FakeWebSocket alice = new FakeWebSocket();
@@ -224,5 +230,60 @@ class LobbyTest {
         FakeWebSocket alice = new FakeWebSocket();
 
         assertFalse(lobby.tryReconnect(alice, "nobody"));
+    }
+
+    // Regression test for a real reported bug: after both players disconnect
+    // from an already-abandoned game and later log back in, tryReconnect
+    // silently reconnects them into that dead session (intentional - see its
+    // own Javadoc, it's what lets a rematch happen). But without
+    // leaveFinishedSessionIfAny, every future "play"/"join_room" from that
+    // connection kept being swallowed by the old session as an unrecognized
+    // command instead of ever reaching a new game.
+    @Test void testLeavingAFinishedSessionFreesTheConnectionToStartANewGame(@TempDir Path tempDir) throws InterruptedException {
+        Lobby lobby = newLobbyWithShortDisconnectGrace(tempDir, 100L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+
+        String code = lobby.createRoom("alice");
+        lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
+
+        lobby.handleDisconnect(alice);
+        Thread.sleep(300); // grace window elapses -> game abandoned, no winner
+        lobby.handleDisconnect(bob); // the other side gives up too, exactly like the reported scenario
+
+        FakeWebSocket aliceAgain = new FakeWebSocket();
+        assertTrue(lobby.tryReconnect(aliceAgain, "alice"), "reconnecting into the finished game must still work - it's how a rematch happens");
+        GameSession finishedSession = lobby.sessionOf(aliceAgain);
+        assertNotNull(finishedSession);
+        assertTrue(finishedSession.isGameOver());
+
+        // alice doesn't want a rematch - she wants a new game, which must not be swallowed by the dead session
+        assertTrue(lobby.leaveFinishedSessionIfAny(aliceAgain));
+        assertNull(lobby.sessionOf(aliceAgain), "leaving the finished session must free this connection for normal lobby routing");
+
+        boolean matched = lobby.play(aliceAgain, "alice", 1200);
+        assertFalse(matched); // no opponent queued yet - just proves play() ran normally instead of being routed into the old session
+    }
+
+    @Test void testLeaveFinishedSessionIfAnyIsANoOpWhileTheGameIsStillInProgress(@TempDir Path tempDir) {
+        Lobby lobby = newLobby(tempDir);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+
+        String code = lobby.createRoom("alice");
+        lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
+
+        assertFalse(lobby.leaveFinishedSessionIfAny(alice));
+        assertSame(lobby.sessionOf(alice), lobby.sessionOf(alice), "still attached - the game isn't over, nothing to leave");
+        assertNotNull(lobby.sessionOf(alice));
+    }
+
+    @Test void testLeaveFinishedSessionIfAnyIsANoOpForAConnectionWithNoSession(@TempDir Path tempDir) {
+        Lobby lobby = newLobby(tempDir);
+        FakeWebSocket alice = new FakeWebSocket();
+
+        assertFalse(lobby.leaveFinishedSessionIfAny(alice));
     }
 }

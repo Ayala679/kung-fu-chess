@@ -227,6 +227,18 @@ public class GameSession {
         return null;
     }
 
+    /**
+     * True once the current game has ended (a real win/resignation, or a
+     * no-winner abandon) - used by KungFuChessServer to tell a "play"/
+     * "join_room" sent by a connection still mapped to this (finished)
+     * session apart from "rematch": the former should leave this session
+     * (see handleDisconnect) and fall through to normal lobby handling
+     * instead of being swallowed here as an unrecognized command.
+     */
+    public synchronized boolean isGameOver() {
+        return engine.isGameOver();
+    }
+
     private void startTicker() {
         scheduler.scheduleAtFixedRate(this::tick, TICK_MS, TICK_MS, TimeUnit.MILLISECONDS);
     }
@@ -319,7 +331,7 @@ public class GameSession {
                 send(connection, Protocol.ERROR + "|" + ERROR_NOT_YOUR_PIECE);
                 actionTaken = false;
             } else {
-                send(connection, Protocol.COMMAND_RESULT + "|SUCCESS"); // both "jump started" and "too late, captured" are valid, non-error outcomes
+                send(connection, Protocol.COMMAND_RESULT + "|SUCCESS"); // owning the piece is all that's required - the jump always actually starts, see GameEngine.requestJump
                 actionTaken = true;
             }
         }
@@ -554,6 +566,11 @@ public class GameSession {
      * this session - it was never a player here, or that seat isn't
      * actually empty (e.g. already reconnected, or this is a stale/duplicate
      * attempt) - so the caller can fall back to normal lobby handling.
+     * Deliberately still succeeds even once the game has already ended (a
+     * disconnect-triggered abandon, most commonly) - reconnecting a player
+     * who comes back is exactly what lets them request a rematch instead of
+     * being stuck GAME_PAUSED forever; see
+     * testEitherSeatedPlayerCanRequestARematchOnceTheGameIsOver.
      */
     public synchronized boolean reconnect(WebSocket connection, String username) {
         if (username.equals(whiteUsername) && whiteConnection == null) {

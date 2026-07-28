@@ -29,11 +29,13 @@ public class Lobby {
     private static final String ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int ROOM_CODE_LENGTH = 6;
     private static final long DEFAULT_MATCHMAKING_TIMEOUT_MILLIS = 60_000L;
+    private static final long DEFAULT_DISCONNECT_GRACE_MILLIS = 20_000L;
 
     private final Bus bus;
     private final UserRepository userRepository;
     private final ActivityLog activityLog;
     private final long matchmakingTimeoutMillis;
+    private final long disconnectGraceMillis;
     private final SecureRandom random = new SecureRandom();
     private final ScheduledExecutorService matchmakingScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "lobby-matchmaking-timeout");
@@ -47,7 +49,7 @@ public class Lobby {
     private final List<Waiting> matchmakingQueue = new ArrayList<>();
 
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog) {
-        this(bus, userRepository, activityLog, DEFAULT_MATCHMAKING_TIMEOUT_MILLIS);
+        this(bus, userRepository, activityLog, DEFAULT_MATCHMAKING_TIMEOUT_MILLIS, DEFAULT_DISCONNECT_GRACE_MILLIS);
     }
 
     /**
@@ -57,10 +59,23 @@ public class Lobby {
      * actually waiting a minute.
      */
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, long matchmakingTimeoutMillis) {
+        this(bus, userRepository, activityLog, matchmakingTimeoutMillis, DEFAULT_DISCONNECT_GRACE_MILLIS);
+    }
+
+    /**
+     * Same as the 4-arg constructor, with the disconnect-&gt;abandon grace
+     * period every GameSession this Lobby creates is given (see
+     * GameSession's own same-named constructor param) also given explicitly
+     * instead of the default 20 seconds - so tests can exercise the
+     * abandon/leaveFinishedSessionIfAny flow without actually waiting.
+     */
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog,
+                 long matchmakingTimeoutMillis, long disconnectGraceMillis) {
         this.bus = bus;
         this.userRepository = userRepository;
         this.activityLog = activityLog;
         this.matchmakingTimeoutMillis = matchmakingTimeoutMillis;
+        this.disconnectGraceMillis = disconnectGraceMillis;
     }
 
     public GameSession sessionOf(WebSocket connection) {
@@ -77,7 +92,7 @@ public class Lobby {
      */
     public String createRoom(String username) {
         String code = newRoomCode();
-        GameSession session = new GameSession(bus, code, userRepository, activityLog);
+        GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
         rooms.put(code, session);
         activityLog.log("room=" + code + " reserved by " + username);
         return code;
@@ -95,12 +110,18 @@ public class Lobby {
     }
 
     /**
-     * Called right after a successful login/register, before any lobby
+     * Called right after a successful login/attach, before any lobby
      * command: if {@code username} was seated (White/Black, never a
      * spectator - see GameSession.reconnect) in a session it has since been
      * disconnected from, restores that seat instead of making them start
      * over. Returns false (silently - the caller proceeds to the normal
-     * play/create_room/join_room flow) if there's nothing to reconnect to.
+     * play/join_room flow) if there's nothing to reconnect to. Deliberately
+     * still reconnects even into an already-finished game (most commonly a
+     * disconnect-triggered abandon) - see GameSession.reconnect - so a
+     * player who comes back can request a rematch instead of finding
+     * nothing there; see leaveFinishedSessionIfAny for the other half of
+     * this: what happens once such a player instead asks for a genuinely
+     * new game.
      */
     public boolean tryReconnect(WebSocket connection, String username) {
         GameSession session = sessionByUsername.get(username);
@@ -111,6 +132,29 @@ public class Lobby {
             activityLog.log("room=" + session.getRoomCode() + " " + username + " reconnected");
         }
         return reconnected;
+    }
+
+    /**
+     * Called by KungFuChessServer when a connection sends "play" or
+     * "join_room &lt;code&gt;" while still mapped (via tryReconnect, above)
+     * to a session whose game has already ended - vacates that connection's
+     * seat exactly like a real disconnect (GameSession.handleDisconnect)
+     * and forgets the connection→session mapping, so the caller can then
+     * fall through to normal play/join_room handling and actually reach a
+     * new room, instead of every future command from this connection being
+     * swallowed as an unrecognized command by the old (finished, rematch-
+     * only) session. A no-op (returns false) if this connection isn't
+     * currently attached to a finished session - e.g. an active game, or no
+     * session at all - so the caller knows whether it actually needs to
+     * detach anything.
+     */
+    public boolean leaveFinishedSessionIfAny(WebSocket connection) {
+        GameSession session = sessionByConnection.get(connection);
+        if (session == null || !session.isGameOver()) return false;
+        session.handleDisconnect(connection);
+        sessionByConnection.remove(connection);
+        activityLog.log("room=" + session.getRoomCode() + " left (game already over) to start a new game");
+        return true;
     }
 
     /**
@@ -130,7 +174,7 @@ public class Lobby {
                 candidate.timeoutTask.cancel(false);
 
                 String code = newRoomCode();
-                GameSession session = new GameSession(bus, code, userRepository, activityLog);
+                GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
                 rooms.put(code, session);
 
                 session.join(candidate.connection, candidate.username, candidate.rating);

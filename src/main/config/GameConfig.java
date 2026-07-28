@@ -14,7 +14,7 @@ public class GameConfig {
     public static final long KNIGHT_TOTAL_DURATION = 3000L; // 3x the per-cell duration
     // A successful dodge requires the jump to still be genuinely airborne -
     // not yet landed - at the moment the incoming attack actually arrives
-    // (see gameengine.RealTimeArbiter.isTooLateToJump/isProtectedByAnInProgressJump);
+    // (see gameengine.RealTimeArbiter.isProtectedByAnInProgressJump);
     // landing back down onto the attacker afterward is what captures it.
     // Deliberately shorter than a single-cell move (the fastest possible
     // attack, MOVE_DURATION_PER_CELL): reacting the instant an adjacent

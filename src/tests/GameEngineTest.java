@@ -171,8 +171,8 @@ class GameEngineTest {
         // An adjacent (1-cell) attack takes MOVE_DURATION_PER_CELL (1000ms).
         // JUMP_DURATION (700ms) is shorter, so reacting the instant the
         // attack starts would land back down long before it arrives - too
-        // early to matter (see testReactiveJumpTooEarlyDies for that mirror
-        // image) - but reacting once the attack is within JUMP_DURATION of
+        // early to matter (see testReactiveJumpTooEarlyWithNoFollowUpStillDiesNormally
+        // for that mirror image) - but reacting once the attack is within JUMP_DURATION of
         // arriving still leaves real room to succeed.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
@@ -217,12 +217,14 @@ class GameEngineTest {
         assertNull(engine.pieceAt(0, 0));
     }
 
-    @Test void testReactiveJumpTooEarlyDies() {
-        // Reacting well before the attack is anywhere near arriving means
-        // the jump finishes and lands back down long before the attacker
-        // gets there - by then it's just an ordinary, undefended piece,
-        // captured normally once the (still slowly approaching) attacker
-        // finally arrives.
+    @Test void testReactiveJumpTooEarlyWithNoFollowUpStillDiesNormally() {
+        // Reacting well before the attack is anywhere near arriving still
+        // starts the jump (it's never rejected outright just because it
+        // looks "too early" relative to some slide already in flight - see
+        // GameEngine.requestJump) - it just finishes and lands back down
+        // long before the attacker gets there. With no follow-up jump, it's
+        // an ordinary, undefended piece by the time the (still slowly
+        // approaching) attacker finally arrives, captured normally.
         Piece[][] grid = new Piece[8][8];
         Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
         Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
@@ -232,11 +234,46 @@ class GameEngineTest {
 
         engine.requestMove(new Position(0, 0), new Position(0, 7)); // 7 cells -> 7000ms
         engine.advanceTime(100);                                     // 6900ms left - way more than JUMP_DURATION (700ms)
-        assertFalse(engine.requestJump(0, 7));                       // too early - the jump would already be over long before the attack arrives
+        assertTrue(engine.requestJump(0, 7));                        // starts anyway - see testEarlyJumpLeavesRoomForAWellTimedSecondJump for why that matters
         engine.advanceTime(100000);
 
-        // too early to matter: the rook arrives and takes the square: the knight dies
+        // no second, better-timed jump ever came: the rook arrives and takes the square, the knight dies
         assertEquals(rook, engine.pieceAt(0, 7));
+    }
+
+    @Test void testEarlyJumpLeavesRoomForAWellTimedSecondJumpThatSurvives() {
+        // Regression: a jump thrown hopelessly early against a distant
+        // attacker must not be an immediate, unrecoverable capture (that
+        // was the actual reported bug - GameEngine.requestJump used to
+        // reject a "too early" jump outright and capture the piece on the
+        // spot, denying it any chance to react again). It should land
+        // normally, rest normally, and then be free to try again - and a
+        // second jump timed correctly before the attacker actually arrives
+        // must still succeed.
+        Piece[][] grid = new Piece[8][8];
+        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
+        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
+        grid[0][0] = rook;
+        grid[0][7] = knight;
+        GameEngine engine = engineWith(grid);
+
+        engine.requestMove(new Position(0, 0), new Position(0, 7)); // 7 cells -> 7000ms, arrives at t=7000
+        engine.advanceTime(100);                                     // t=100 - way too early to matter against this slide
+        assertTrue(engine.requestJump(0, 7));                        // wasted, but survives the attempt itself
+
+        // Advance in realistic ~16ms ticks (like BoardWindow's Timer / GameSession's
+        // ticker), not one huge jump - the jump's landing (t=800) and short
+        // rest (until t=1400) both need to actually be processed as they
+        // happen, not skipped over in a single big advanceTime() call (see
+        // testReactiveJumpStillSucceedsWithRealisticIncrementalTicking).
+        for (int i = 0; i < 394; i++) { // 394 * 16ms = 6304ms -> t=6404, ~600ms left before the rook arrives at t=7000
+            engine.advanceTime(16);
+        }
+        assertTrue(engine.requestJump(0, 7));                        // second, well-timed jump - still airborne when the rook arrives
+        engine.advanceTime(100000);
+
+        assertEquals(knight, engine.pieceAt(0, 7)); // survived - the earlier wasted jump didn't cost it its real chance
+        assertNull(engine.pieceAt(0, 0));
     }
 
     @Test void testPreemptiveJumpDoesNotDefendAMuchLaterEnemySlide() {

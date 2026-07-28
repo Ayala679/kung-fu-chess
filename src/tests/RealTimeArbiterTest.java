@@ -3,7 +3,6 @@ package tests;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-import config.GameConfig;
 import model.Board;
 import model.GameState;
 import model.Piece;
@@ -534,88 +533,6 @@ class RealTimeArbiterTest {
         arbiter.update();
 
         assertTrue(state.isGameOver());
-    }
-
-    @Test void testIsTooLateToJumpWhenReactingTooEarly() {
-        // Reacting when there's still much more than JUMP_DURATION left on
-        // the incoming attack means the jump would land back down long
-        // before the attack arrives - too early to matter, so it's "too
-        // late" in the sense that jumping wouldn't help at all.
-        Piece[][] grid = new Piece[8][8];
-        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
-        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
-        grid[0][0] = rook;
-        grid[0][3] = knight;
-        Board board = new Board(grid);
-        GameState state = new GameState();
-        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
-
-        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 1000);
-        state.advanceTime(100); // 900ms left - well more than JUMP_DURATION (700ms), reacting way too early
-
-        assertTrue(arbiter.isTooLateToJump(0, 3, knight));
-    }
-
-    @Test void testIsTooLateToJumpIsFalseOnAnExactTie() {
-        // Regression: a jump that would finish at EXACTLY the same instant the
-        // enemy slide arrives must not be "too late" - ties go to the
-        // defender, same as the mid-air capture resolution in update().
-        Piece[][] grid = new Piece[8][8];
-        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
-        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
-        grid[0][0] = rook;
-        grid[0][3] = knight;
-        Board board = new Board(grid);
-        GameState state = new GameState();
-        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
-
-        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), GameConfig.JUMP_DURATION);
-
-        assertFalse(arbiter.isTooLateToJump(0, 3, knight));
-    }
-
-    @Test void testIsTooLateToJumpIsFalseWhenReactingWithLittleTimeLeft() {
-        // The mirror image of the "too early" test above: reacting once the
-        // attack has JUMP_DURATION or less left on its own clock means the
-        // jump will still be airborne when it arrives - not too late.
-        Piece[][] grid = new Piece[8][8];
-        Piece rook = Piece.of(Piece.Color.WHITE, Piece.Type.R);
-        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
-        grid[0][0] = rook;
-        grid[0][3] = knight;
-        Board board = new Board(grid);
-        GameState state = new GameState();
-        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
-
-        arbiter.startMove(rook, new Position(0, 0), new Position(0, 3), 1000);
-        state.advanceTime(400); // 600ms left - within JUMP_DURATION (700ms)
-
-        assertFalse(arbiter.isTooLateToJump(0, 3, knight));
-    }
-
-    @Test void testIsTooLateToJumpFalseWhenIncomingPieceIsFriendly() {
-        Piece[][] grid = new Piece[8][8];
-        Piece rookA = Piece.of(Piece.Color.WHITE, Piece.Type.R);
-        Piece rookB = Piece.of(Piece.Color.WHITE, Piece.Type.R);
-        grid[0][0] = rookA;
-        grid[0][3] = rookB;
-        Board board = new Board(grid);
-        GameState state = new GameState();
-        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
-
-        arbiter.startMove(rookA, new Position(0, 0), new Position(0, 3), 1000);
-
-        // same color as the incoming slide - not "too late", just a friendly square
-        assertFalse(arbiter.isTooLateToJump(0, 3, rookB));
-    }
-
-    @Test void testIsTooLateToJumpFalseWhenNoIncomingEnemy() {
-        Board board = new Board(new Piece[8][8]);
-        GameState state = new GameState();
-        RealTimeArbiter arbiter = new RealTimeArbiter(board, state);
-        Piece knight = Piece.of(Piece.Color.BLACK, Piece.Type.N);
-
-        assertFalse(arbiter.isTooLateToJump(0, 3, knight));
     }
 
     @Test void testKnightRaceConflictWhenTheKnightWouldBeTheSecondRequest() {
