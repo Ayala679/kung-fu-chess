@@ -365,12 +365,31 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
   game a connection ends up in to `Lobby`. `onClose` calls
   `lobby.handleDisconnect(conn)`.
   - `HttpApiServer` - the REST half of the protocol, built on the JDK's own
-    `com.sun.net.httpserver` (no new web-framework dependency), running
-    alongside the WebSocket server in the same process on its own port
-    (`8888` by default, `8887 + 1`): `POST /api/login`/`POST /api/register`
-    (form-encoded `username`/`password`, reuses `AuthController.handleAuth`
-    unchanged, replies `AUTH_OK|token|rating`/`ERROR|reason`) and
-    `POST /api/rooms` (form-encoded `token`, replies `ROOM_CREATED|code`).
+    `com.sun.net.httpserver` (no new web-framework dependency): `POST
+    /api/login`/`POST /api/register` (form-encoded `username`/`password`,
+    reuses `AuthController.handleAuth` unchanged, replies
+    `AUTH_OK|token|rating`/`ERROR|reason`) and `POST /api/rooms`
+    (form-encoded `token`, replies `ROOM_CREATED|code` or, if room creation
+    fails - see `RoomCreator` below - `503`/`ERROR|room service
+    unavailable`). Runs on its own port (`8888` by default, `8887 + 1`) in
+    one of two places depending on topology: **embedded** inside
+    `KungFuChessServer` for local/offline runs (`KFC_REDIS_URL`/
+    `KFC_NATS_URL` both unset - unchanged since before step 4), or as its
+    own standalone process, **`server.ApiGateway`** (own `main`, its own
+    `UserRepository`/`AuthController`/`RedisSessionTokenStore` - all
+    already genuinely shared/multi-process-safe stores, nothing new needed
+    for those), in the Docker Compose deployment. Room creation is the one
+    thing that can't just be a local Java call once the API Gateway is a
+    separate process from `Lobby` - `RoomCreator` (an interface -
+    `LocalRoomCreator` wraps a direct `Lobby` reference, embedded case only;
+    `RemoteRoomCreator` sends a real, blocking NATS request on subject
+    `lobby.create_room` and waits for the room code back) abstracts over
+    that. The game-process side of that request is `RoomCreationResponder`
+    - started by `KungFuChessServer` instead of embedding `HttpApiServer`
+    whenever both env vars are set, subscribing on the same NATS connection
+    the process already opened for `Bus` (`NatsBus.rawConnection()`). See
+    "REST API / scalable-server design" below and `Server_Design.md`'s
+    "Step 4" for the full picture.
     `SessionTokenStore` (an interface - `InMemorySessionTokenStore` for
     local/offline runs and every unit test, `RedisSessionTokenStore` when
     `KFC_REDIS_URL` is set, see "REST API / scalable-server design" below)
@@ -568,19 +587,26 @@ Docker/Kubernetes) asked for a step toward a scalable server, being built
 up in a small number of independently-committable steps - `Server_Design.md`
 is the full writeup, including the current roadmap and exactly what's
 deliberately not done yet at each stage (a real Game Allocator, multiple
-Game Server Shards, Kubernetes manifests - `Lobby.matchmakingQueue`
-specifically staying in-process a while longer too, see `Server_Design.md`
-for why). What *is* done so far: login/register/room-creation moved to a
-REST API (`HttpApiServer`) sitting next to the WebSocket server in the same
-process; `UserRepository` now speaks either SQLite (local dev/tests, zero
-external services) or PostgreSQL (the Docker Compose deployment);
-`SessionTokenStore`/`ReconnectRegistry` (see above) now speak either
-in-memory (same conditions) or Redis; `bus.Bus` now speaks either in-memory
-or NATS; `Dockerfile` + `docker-compose.yml` run the server (Postgres,
-Redis, and NATS included) as one small, working containerized step -
+Game Server Shards, splitting the WS Gateway from the Game Server Shard,
+Kubernetes manifests - `Lobby.matchmakingQueue` specifically staying
+in-process a while longer too, see `Server_Design.md` for why). What *is*
+done so far: login/register/room-creation moved to a REST API
+(`HttpApiServer`), now genuinely running as its own process
+(`server.ApiGateway`) separate from the WebSocket Gateway
+(`KungFuChessServer`) in the Docker Compose deployment - see the
+`server/` bullet above for exactly how room creation crosses that process
+boundary (`RoomCreator`/NATS request-reply); `UserRepository` now speaks
+either SQLite (local dev/tests, zero external services) or PostgreSQL (the
+Docker Compose deployment); `SessionTokenStore`/`ReconnectRegistry` (see
+above) now speak either in-memory (same conditions) or Redis; `bus.Bus` now
+speaks either in-memory or NATS; `Dockerfile` + `docker-compose.yml` run
+the whole thing (Postgres, Redis, NATS, the WS Gateway/Game Server Shard,
+and the API Gateway, each its own container) as one command -
 `docker compose up --build` (see "Commands" above). The Swing client is
 never containerized - it's a desktop GUI, run locally against the
-container's exposed ports.
+container's exposed ports (the WS Gateway's 8887 and the API Gateway's
+8888 - it has no way to know, or need to know, that those two ports now
+belong to two different containers).
 
 This is phases 1-3 of a staged brief: pub/sub bus + WebSocket server + 2
 players; SQLite-backed accounts + ELO rating; ELO-ranged quick-match,

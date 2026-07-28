@@ -24,20 +24,22 @@ import server.auth.SessionTokenStore;
  * instead of on the WebSocket. Built on the JDK's own com.sun.net.httpserver
  * rather than adding a web-framework dependency, matching this project's
  * existing "avoid new dependencies for a small text protocol" choices
- * (SnapshotCodec, ActivityLog). Runs in the same process/JVM as
- * KungFuChessServer for now - a real API Gateway split into its own
- * container is future work, see Server_Design.md.
+ * (SnapshotCodec, ActivityLog). Runs embedded in the same process/JVM as
+ * KungFuChessServer for local/offline runs, or standalone as its own
+ * process (server.ApiGateway) in the Docker Compose deployment - see
+ * Server_Design.md's "Step 4" and server.RoomCreator for how room creation
+ * is made to work either way.
  */
 public class HttpApiServer {
     private final HttpServer httpServer;
 
     public HttpApiServer(int port, AuthController authController, SessionTokenStore sessionTokenStore,
-                          Lobby lobby, ActivityLog activityLog) throws IOException {
+                          RoomCreator roomCreator, ActivityLog activityLog) throws IOException {
         this.httpServer = HttpServer.create(new InetSocketAddress(port), 0);
         httpServer.setExecutor(Executors.newCachedThreadPool());
         httpServer.createContext("/api/login", authHandler(Protocol.LOGIN, authController, sessionTokenStore, activityLog));
         httpServer.createContext("/api/register", authHandler(Protocol.REGISTER, authController, sessionTokenStore, activityLog));
-        httpServer.createContext("/api/rooms", roomsHandler(sessionTokenStore, lobby, activityLog));
+        httpServer.createContext("/api/rooms", roomsHandler(sessionTokenStore, roomCreator, activityLog));
     }
 
     public void start() {
@@ -81,7 +83,7 @@ public class HttpApiServer {
         };
     }
 
-    private static HttpHandler roomsHandler(SessionTokenStore sessionTokenStore, Lobby lobby, ActivityLog activityLog) {
+    private static HttpHandler roomsHandler(SessionTokenStore sessionTokenStore, RoomCreator roomCreator, ActivityLog activityLog) {
         return exchange -> {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
                 respond(exchange, 405, Protocol.ERROR + "|expected POST");
@@ -94,8 +96,16 @@ public class HttpApiServer {
                 return;
             }
 
-            String code = lobby.createRoom(principal.get().username());
-            activityLog.log("HTTP create_room ok for " + principal.get().username() + " -> room=" + code);
+            String username = principal.get().username();
+            String code;
+            try {
+                code = roomCreator.createRoom(username);
+            } catch (RoomCreationException e) {
+                activityLog.log("HTTP create_room failed for " + username + ": " + e.getMessage());
+                respond(exchange, 503, Protocol.ERROR + "|room service unavailable");
+                return;
+            }
+            activityLog.log("HTTP create_room ok for " + username + " -> room=" + code);
             respond(exchange, 200, Protocol.ROOM_CREATED + "|" + code);
         };
     }

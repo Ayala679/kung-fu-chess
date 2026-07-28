@@ -49,4 +49,9 @@ public class NatsBus implements Bus {
     public void close() throws InterruptedException {
         connection.close();
     }
+
+    /** The underlying NATS connection this Bus already opened - reused by server.RoomCreationResponder for its own request-reply subscription instead of opening a second, redundant connection. */
+    public Connection rawConnection() {
+        return connection;
+    }
 }

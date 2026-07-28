@@ -1,13 +1,12 @@
-# Small, working containerized step for the Kung Fu Chess server - see
-# Server_Design.md for what this does and deliberately doesn't cover yet
-# (a real Game Allocator, multiple Game Server Shards, K8s). Redis (shared
-# session/reconnect state) and NATS (the internal event bus) are both
-# included now, still feeding a single server process - see
-# Server_Design.md for exactly what moved and why the rest is deferred to
-# the next step (splitting the API Gateway/WS Gateway/Game Server Shard
-# into separate processes, which is what actually needs them). The Swing
-# client is never containerized - run it locally (see CLAUDE.md) against
-# the ports this exposes.
+# Working containerized step for the Kung Fu Chess server - see
+# Server_Design.md for the roadmap and what's deliberately still not
+# covered (a real Game Allocator, multiple Game Server Shards, K8s).
+# `api-gateway` (login/register/room-creation) is now a genuinely separate
+# process/container from `server` (the WebSocket Gateway/Matchmaker/Game
+# Server Shard) - they only talk to each other over redis/nats, never a
+# direct Java call; see Server_Design.md's "Step 4". The Swing client is
+# never containerized - run it locally (see CLAUDE.md) against the ports
+# this exposes.
 #
 # Requires a .env file (git-ignored, never committed) with POSTGRES_PASSWORD
 # set - copy .env.example to .env and edit it before running
@@ -59,10 +58,34 @@ services:
       KFC_REDIS_URL: "redis://redis:6379"
       KFC_NATS_URL: "nats://nats:4222"
       KFC_WS_PORT: "8887"
-      KFC_HTTP_PORT: "8888"
       KFC_LOG_PATH: "logs/server.log"
     ports:
       - "8887:8887"
+    volumes:
+      - ./logs:/app/logs
+
+  api-gateway:
+    build: .
+    # The Dockerfile bakes in ENTRYPOINT ["java", "-cp", "out:lib/*", "server.KungFuChessServer"] -
+    # Compose's `command:` only supplies/replaces CMD, which gets appended
+    # to that ENTRYPOINT rather than replacing it, so `entrypoint:` has to
+    # be overridden here too, or this ends up literally running
+    # `... server.KungFuChessServer java -cp out:lib/* server.ApiGateway`.
+    entrypoint: ["java", "-cp", "out:lib/*", "server.ApiGateway"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      KFC_DB_URL: "jdbc:postgresql://postgres:5432/kungfuchess?user=kungfuchess&password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a .env file - see .env.example}"
+      KFC_REDIS_URL: "redis://redis:6379"
+      KFC_NATS_URL: "nats://nats:4222"
+      KFC_HTTP_PORT: "8888"
+      KFC_LOG_PATH: "logs/api-gateway.log"
+    ports:
       - "8888:8888"
     volumes:
       - ./logs:/app/logs

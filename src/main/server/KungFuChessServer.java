@@ -21,16 +21,23 @@ import server.auth.SessionTokenStore;
 import server.auth.UserRepository;
 
 /**
- * Single-process Kung Fu Chess server: accepts WebSocket connections whose
- * first message must be "attach <token>" (a bearer token minted by the REST
- * login/register endpoints - see HttpApiServer - checked against a
- * UserRepository backed by SQLite locally or PostgreSQL when deployed via
- * Docker Compose), then - once authenticated - waits for exactly one lobby
- * command ("play" or "join_room <code>"; room *creation* is REST-only now,
- * see Lobby.createRoom) before handing the connection off to a GameSession
- * via Lobby. Everything about the game itself - rules, timing, captures,
+ * The WebSocket Gateway + Matchmaker + the one Game Server Shard: accepts
+ * WebSocket connections whose first message must be "attach <token>" (a
+ * bearer token minted by the REST login/register endpoints - see
+ * HttpApiServer - checked against a UserRepository backed by SQLite
+ * locally or PostgreSQL when deployed via Docker Compose), then - once
+ * authenticated - waits for exactly one lobby command ("play" or
+ * "join_room <code>"; room *creation* is REST-only now, see
+ * Lobby.createRoom) before handing the connection off to a GameSession via
+ * Lobby. Everything about the game itself - rules, timing, captures,
  * ratings - is delegated entirely to GameSession/GameEngine, the exact same
  * classes the offline client uses.
+ *
+ * Local/offline runs (no KFC_REDIS_URL/KFC_NATS_URL) embed HttpApiServer
+ * directly, single-process, exactly as before step 4. The Docker Compose
+ * deployment instead runs HttpApiServer as its own separate process
+ * (server.ApiGateway), reaching this process's Lobby only through a NATS
+ * request (RoomCreationResponder) - see Server_Design.md's "Step 4".
  */
 public class KungFuChessServer extends WebSocketServer {
     public static final int DEFAULT_PORT = 8887;
@@ -44,7 +51,12 @@ public class KungFuChessServer extends WebSocketServer {
     private final AuthController authController;
     private final SessionTokenStore sessionTokenStore;
     private final Lobby lobby;
+    // Exactly one of these two is non-null, depending on topology (see the
+    // constructor): local/offline runs embed HttpApiServer directly;
+    // distributed (Docker Compose) runs instead listen for room-creation
+    // requests from a separate server.ApiGateway process over NATS.
     private final HttpApiServer httpApiServer;
+    private final RoomCreationResponder roomCreationResponder;
     private final Map<WebSocket, String> usernames = new ConcurrentHashMap<>();
     private final Map<WebSocket, Integer> ratings = new ConcurrentHashMap<>();
 
@@ -96,10 +108,22 @@ public class KungFuChessServer extends WebSocketServer {
         ReconnectRegistry reconnectRegistry = redisUrl != null ? new RedisReconnectRegistry(redisUrl) : new InMemoryReconnectRegistry();
 
         this.lobby = new Lobby(bus, userRepository, activityLog, reconnectRegistry);
-        try {
-            this.httpApiServer = new HttpApiServer(httpPort, authController, sessionTokenStore, lobby, activityLog);
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not start HTTP API server on port " + httpPort, e);
+
+        // Distributed topology (redisUrl and natsUrl both set - Docker
+        // Compose from step 4 on): a separate server.ApiGateway process
+        // owns HttpApiServer now, reaching this process's Lobby only over
+        // NATS - see RoomCreationResponder/RemoteRoomCreator. Local/offline
+        // runs (either unset) keep the original single-process embedding.
+        if (redisUrl != null && natsUrl != null) {
+            this.httpApiServer = null;
+            this.roomCreationResponder = new RoomCreationResponder(natsBus.rawConnection(), lobby);
+        } else {
+            this.roomCreationResponder = null;
+            try {
+                this.httpApiServer = new HttpApiServer(httpPort, authController, sessionTokenStore, new LocalRoomCreator(lobby), activityLog);
+            } catch (IOException e) {
+                throw new IllegalStateException("Could not start HTTP API server on port " + httpPort, e);
+            }
         }
     }
 
@@ -230,14 +254,20 @@ public class KungFuChessServer extends WebSocketServer {
 
     @Override
     public void onStart() {
-        httpApiServer.start();
-        System.out.println("Kung Fu Chess server listening on port " + getPort()
-                + " (WS) and " + httpApiServer.getPort() + " (HTTP)");
+        if (httpApiServer != null) {
+            httpApiServer.start();
+            System.out.println("Kung Fu Chess server listening on port " + getPort()
+                    + " (WS) and " + httpApiServer.getPort() + " (HTTP)");
+        } else {
+            System.out.println("Kung Fu Chess server listening on port " + getPort()
+                    + " (WS); room creation served remotely over NATS - see server.ApiGateway");
+        }
     }
 
     /** Stops the WebSocket/HTTP servers and the NATS connection (if any) - used by main()'s shutdown hook so Docker's SIGTERM (docker compose down) shuts down cleanly instead of being killed. */
     public void stopAll() throws InterruptedException {
-        httpApiServer.stop();
+        if (httpApiServer != null) httpApiServer.stop();
+        if (roomCreationResponder != null) roomCreationResponder.close();
         if (natsBus != null) natsBus.close();
         stop();
     }
