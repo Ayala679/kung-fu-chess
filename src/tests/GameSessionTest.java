@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 import bus.Bus;
+import bus.InMemoryBus;
 import logging.ActivityLog;
 import server.GameSession;
 import server.Seat;
@@ -17,7 +18,7 @@ import snapshot.GameSnapshot;
 class GameSessionTest {
 
     private static GameSession newSession(Path tempDir, long disconnectResignDelayMillis) {
-        Bus bus = new Bus();
+        Bus bus = new InMemoryBus();
         UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
         ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
         return new GameSession(bus, "ROOM1", userRepository, activityLog, disconnectResignDelayMillis);

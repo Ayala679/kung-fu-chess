@@ -1,8 +1,13 @@
 # Small, working containerized step for the Kung Fu Chess server - see
 # Server_Design.md for what this does and deliberately doesn't cover yet
-# (a real Game Allocator, multiple Game Server Shards, Redis, NATS, K8s).
-# The Swing client is never containerized - run it locally (see CLAUDE.md)
-# against the ports this exposes.
+# (a real Game Allocator, multiple Game Server Shards, K8s). Redis (shared
+# session/reconnect state) and NATS (the internal event bus) are both
+# included now, still feeding a single server process - see
+# Server_Design.md for exactly what moved and why the rest is deferred to
+# the next step (splitting the API Gateway/WS Gateway/Game Server Shard
+# into separate processes, which is what actually needs them). The Swing
+# client is never containerized - run it locally (see CLAUDE.md) against
+# the ports this exposes.
 #
 # Requires a .env file (git-ignored, never committed) with POSTGRES_PASSWORD
 # set - copy .env.example to .env and edit it before running
@@ -23,13 +28,36 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2-alpine
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command: ["-m", "8222"] # expose the monitoring endpoint the healthcheck above uses
+
   server:
     build: .
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
     environment:
       KFC_DB_URL: "jdbc:postgresql://postgres:5432/kungfuchess?user=kungfuchess&password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a .env file - see .env.example}"
+      KFC_REDIS_URL: "redis://redis:6379"
+      KFC_NATS_URL: "nats://nats:4222"
       KFC_WS_PORT: "8887"
       KFC_HTTP_PORT: "8888"
       KFC_LOG_PATH: "logs/server.log"

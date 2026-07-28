@@ -11,8 +11,12 @@ import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 
 import bus.Bus;
+import bus.InMemoryBus;
+import bus.NatsBus;
 import logging.ActivityLog;
 import server.auth.AuthController;
+import server.auth.InMemorySessionTokenStore;
+import server.auth.RedisSessionTokenStore;
 import server.auth.SessionTokenStore;
 import server.auth.UserRepository;
 
@@ -34,25 +38,26 @@ public class KungFuChessServer extends WebSocketServer {
     private static final String DEFAULT_DB_PATH = "data/kungfuchess.db";
     private static final String DEFAULT_LOG_PATH = "logs/server.log";
 
-    private final Bus bus = new Bus();
+    private final Bus bus;
+    private final NatsBus natsBus; // non-null only if bus is actually a NatsBus - so stopAll() knows whether there's a connection to close
     private final ActivityLog activityLog;
     private final AuthController authController;
-    private final SessionTokenStore sessionTokenStore = new SessionTokenStore();
+    private final SessionTokenStore sessionTokenStore;
     private final Lobby lobby;
     private final HttpApiServer httpApiServer;
     private final Map<WebSocket, String> usernames = new ConcurrentHashMap<>();
     private final Map<WebSocket, Integer> ratings = new ConcurrentHashMap<>();
 
     public KungFuChessServer(int port) {
-        this(port, DEFAULT_HTTP_PORT, DEFAULT_DB_PATH, DEFAULT_LOG_PATH);
+        this(port, DEFAULT_HTTP_PORT, DEFAULT_DB_PATH, DEFAULT_LOG_PATH, null, null);
     }
 
     public KungFuChessServer(int port, String dbUrlOrPath) {
-        this(port, DEFAULT_HTTP_PORT, dbUrlOrPath, DEFAULT_LOG_PATH);
+        this(port, DEFAULT_HTTP_PORT, dbUrlOrPath, DEFAULT_LOG_PATH, null, null);
     }
 
     public KungFuChessServer(int port, String dbUrlOrPath, String logPath) {
-        this(port, DEFAULT_HTTP_PORT, dbUrlOrPath, logPath);
+        this(port, DEFAULT_HTTP_PORT, dbUrlOrPath, logPath, null, null);
     }
 
     /**
@@ -60,13 +65,37 @@ public class KungFuChessServer extends WebSocketServer {
      *                    behavior, unchanged) or a full JDBC URL
      *                    (e.g. {@code jdbc:postgresql://...}) - see
      *                    UserRepository's constructor.
+     * @param redisUrl    e.g. {@code redis://redis:6379} - null/absent means
+     *                    the in-memory SessionTokenStore/ReconnectRegistry
+     *                    (local/offline runs, and every unit test); see
+     *                    Server_Design.md for why this is a deliberate,
+     *                    still-single-process-safe scope, not a full
+     *                    Redis migration.
+     * @param natsUrl     e.g. {@code nats://nats:4222} - null/absent means
+     *                    the in-memory Bus (same reasoning as redisUrl).
      */
-    public KungFuChessServer(int port, int httpPort, String dbUrlOrPath, String logPath) {
+    public KungFuChessServer(int port, int httpPort, String dbUrlOrPath, String logPath, String redisUrl, String natsUrl) {
         super(new InetSocketAddress(port));
         UserRepository userRepository = new UserRepository(dbUrlOrPath);
         this.activityLog = new ActivityLog(logPath);
         this.authController = new AuthController(userRepository, activityLog);
-        this.lobby = new Lobby(bus, userRepository, activityLog);
+
+        if (natsUrl != null) {
+            try {
+                this.natsBus = new NatsBus(natsUrl);
+            } catch (IOException | InterruptedException e) {
+                throw new IllegalStateException("Could not connect to NATS at " + natsUrl, e);
+            }
+            this.bus = natsBus;
+        } else {
+            this.natsBus = null;
+            this.bus = new InMemoryBus();
+        }
+
+        this.sessionTokenStore = redisUrl != null ? new RedisSessionTokenStore(redisUrl) : new InMemorySessionTokenStore();
+        ReconnectRegistry reconnectRegistry = redisUrl != null ? new RedisReconnectRegistry(redisUrl) : new InMemoryReconnectRegistry();
+
+        this.lobby = new Lobby(bus, userRepository, activityLog, reconnectRegistry);
         try {
             this.httpApiServer = new HttpApiServer(httpPort, authController, sessionTokenStore, lobby, activityLog);
         } catch (IOException e) {
@@ -206,9 +235,10 @@ public class KungFuChessServer extends WebSocketServer {
                 + " (WS) and " + httpApiServer.getPort() + " (HTTP)");
     }
 
-    /** Stops both the WebSocket and HTTP servers - used by main()'s shutdown hook so Docker's SIGTERM (docker compose down) shuts down cleanly instead of being killed. */
+    /** Stops the WebSocket/HTTP servers and the NATS connection (if any) - used by main()'s shutdown hook so Docker's SIGTERM (docker compose down) shuts down cleanly instead of being killed. */
     public void stopAll() throws InterruptedException {
         httpApiServer.stop();
+        if (natsBus != null) natsBus.close();
         stop();
     }
 
@@ -217,8 +247,10 @@ public class KungFuChessServer extends WebSocketServer {
         int httpPort = envInt("KFC_HTTP_PORT", DEFAULT_HTTP_PORT);
         String dbUrlOrPath = System.getenv().getOrDefault("KFC_DB_URL", DEFAULT_DB_PATH);
         String logPath = System.getenv().getOrDefault("KFC_LOG_PATH", DEFAULT_LOG_PATH);
+        String redisUrl = System.getenv("KFC_REDIS_URL");
+        String natsUrl = System.getenv("KFC_NATS_URL");
 
-        KungFuChessServer server = new KungFuChessServer(port, httpPort, dbUrlOrPath, logPath);
+        KungFuChessServer server = new KungFuChessServer(port, httpPort, dbUrlOrPath, logPath, redisUrl, natsUrl);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
                 server.stopAll();

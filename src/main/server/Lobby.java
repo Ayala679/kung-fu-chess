@@ -4,6 +4,7 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -34,6 +35,7 @@ public class Lobby {
     private final Bus bus;
     private final UserRepository userRepository;
     private final ActivityLog activityLog;
+    private final ReconnectRegistry reconnectRegistry;
     private final long matchmakingTimeoutMillis;
     private final long disconnectGraceMillis;
     private final SecureRandom random = new SecureRandom();
@@ -45,35 +47,36 @@ public class Lobby {
 
     private final Map<String, GameSession> rooms = new ConcurrentHashMap<>();
     private final Map<WebSocket, GameSession> sessionByConnection = new ConcurrentHashMap<>();
-    private final Map<String, GameSession> sessionByUsername = new ConcurrentHashMap<>();
     private final List<Waiting> matchmakingQueue = new ArrayList<>();
 
-    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog) {
-        this(bus, userRepository, activityLog, DEFAULT_MATCHMAKING_TIMEOUT_MILLIS, DEFAULT_DISCONNECT_GRACE_MILLIS);
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry) {
+        this(bus, userRepository, activityLog, reconnectRegistry, DEFAULT_MATCHMAKING_TIMEOUT_MILLIS, DEFAULT_DISCONNECT_GRACE_MILLIS);
     }
 
     /**
-     * Same as the 3-arg constructor, with the "give up waiting" timeout for
+     * Same as the 4-arg constructor, with the "give up waiting" timeout for
      * {@link #play} given explicitly (in milliseconds) instead of the
      * default 60 seconds - so tests can use a short delay instead of
      * actually waiting a minute.
      */
-    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, long matchmakingTimeoutMillis) {
-        this(bus, userRepository, activityLog, matchmakingTimeoutMillis, DEFAULT_DISCONNECT_GRACE_MILLIS);
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
+                 long matchmakingTimeoutMillis) {
+        this(bus, userRepository, activityLog, reconnectRegistry, matchmakingTimeoutMillis, DEFAULT_DISCONNECT_GRACE_MILLIS);
     }
 
     /**
-     * Same as the 4-arg constructor, with the disconnect-&gt;abandon grace
+     * Same as the 5-arg constructor, with the disconnect-&gt;abandon grace
      * period every GameSession this Lobby creates is given (see
      * GameSession's own same-named constructor param) also given explicitly
      * instead of the default 20 seconds - so tests can exercise the
      * abandon/leaveFinishedSessionIfAny flow without actually waiting.
      */
-    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog,
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
                  long matchmakingTimeoutMillis, long disconnectGraceMillis) {
         this.bus = bus;
         this.userRepository = userRepository;
         this.activityLog = activityLog;
+        this.reconnectRegistry = reconnectRegistry;
         this.matchmakingTimeoutMillis = matchmakingTimeoutMillis;
         this.disconnectGraceMillis = disconnectGraceMillis;
     }
@@ -104,7 +107,7 @@ public class Lobby {
         if (session == null) return null;
         session.join(connection, username, rating);
         sessionByConnection.put(connection, session);
-        sessionByUsername.put(username, session);
+        reconnectRegistry.record(username, code);
         activityLog.log("room=" + code + " joined by " + username);
         return session;
     }
@@ -124,8 +127,10 @@ public class Lobby {
      * new game.
      */
     public boolean tryReconnect(WebSocket connection, String username) {
-        GameSession session = sessionByUsername.get(username);
-        if (session == null) return false;
+        Optional<String> roomCode = reconnectRegistry.roomCodeFor(username);
+        if (roomCode.isEmpty()) return false;
+        GameSession session = rooms.get(roomCode.get());
+        if (session == null) return false; // this process no longer knows the room (e.g. never actually loaded it) - nothing to reconnect to
         boolean reconnected = session.reconnect(connection, username);
         if (reconnected) {
             sessionByConnection.put(connection, session);
@@ -181,8 +186,8 @@ public class Lobby {
                 session.join(connection, username, rating);
                 sessionByConnection.put(candidate.connection, session);
                 sessionByConnection.put(connection, session);
-                sessionByUsername.put(candidate.username, session);
-                sessionByUsername.put(username, session);
+                reconnectRegistry.record(candidate.username, code);
+                reconnectRegistry.record(username, code);
 
                 activityLog.log("room=" + code + " quick-match: " + candidate.username + " vs " + username);
                 return true;

@@ -6,9 +6,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-import bus.Bus;
+import bus.InMemoryBus;
 import logging.ActivityLog;
 import server.GameSession;
+import server.InMemoryReconnectRegistry;
 import server.Lobby;
 import server.Seat;
 import server.auth.UserRepository;
@@ -18,19 +19,19 @@ class LobbyTest {
     private static Lobby newLobby(Path tempDir) {
         UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
         ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
-        return new Lobby(new Bus(), userRepository, activityLog);
+        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry());
     }
 
     private static Lobby newLobbyWithShortMatchmakingTimeout(Path tempDir, long timeoutSeconds) {
         UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
         ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
-        return new Lobby(new Bus(), userRepository, activityLog, timeoutSeconds);
+        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(), timeoutSeconds);
     }
 
     private static Lobby newLobbyWithShortDisconnectGrace(Path tempDir, long disconnectGraceMillis) {
         UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
         ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
-        return new Lobby(new Bus(), userRepository, activityLog, 60_000L, disconnectGraceMillis);
+        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(), 60_000L, disconnectGraceMillis);
     }
 
     @Test void testPlayQueuesWhenNoOneIsWaiting(@TempDir Path tempDir) {

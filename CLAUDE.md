@@ -17,10 +17,11 @@ by a `tools/*.ps1` script on first use).
 
 ## Commands
 
-Fetch runtime dependencies once (Java-WebSocket + its slf4j-api dependency,
-and sqlite-jdbc + postgresql - both JDBC drivers used by the `server`/
-`client` packages; `UserRepository` picks whichever one matches the
-`jdbc:` URL scheme it's given at runtime, see "Networking" below):
+Fetch runtime dependencies once (Java-WebSocket + its slf4j-api dependency;
+sqlite-jdbc + postgresql, both JDBC drivers - `UserRepository` picks
+whichever one matches the `jdbc:` URL scheme it's given at runtime; jedis +
+commons-pool2, and jnats - the Redis and NATS clients, both selected the
+same way via `KFC_REDIS_URL`/`KFC_NATS_URL` - see "Networking" below):
 ```powershell
 powershell -File tools/fetch-libs.ps1
 ```
@@ -30,7 +31,7 @@ since `sources.txt` compiles the whole project, networking code included,
 in one `javac` invocation):
 ```bash
 cd src/main
-javac -encoding UTF-8 -cp "../../lib/Java-WebSocket-1.5.6.jar;../../lib/slf4j-api-2.0.13.jar;../../lib/sqlite-jdbc-3.46.1.3.jar;../../lib/postgresql-42.7.4.jar" -d ../../out @sources.txt
+javac -encoding UTF-8 -cp "../../lib/Java-WebSocket-1.5.6.jar;../../lib/slf4j-api-2.0.13.jar;../../lib/sqlite-jdbc-3.46.1.3.jar;../../lib/postgresql-42.7.4.jar;../../lib/jedis-5.1.3.jar;../../lib/commons-pool2-2.12.0.jar;../../lib/jnats-2.17.2.jar" -d ../../out @sources.txt
 cd ../..
 ```
 `sources.txt` (in `src/main/`) is the authoritative file list for `javac`;
@@ -63,8 +64,8 @@ with the networked GUI client (its own log at `logs/client-<username>.log`)
 - the client shows a Login/Register alert, then a Quick Play/Room alert,
 before anything else opens; see README.md for the full walkthrough:
 ```bash
-java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar;lib/postgresql-42.7.4.jar" server.KungFuChessServer
-java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar;lib/postgresql-42.7.4.jar" NetworkGuiMain
+java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar;lib/postgresql-42.7.4.jar;lib/jedis-5.1.3.jar;lib/commons-pool2-2.12.0.jar;lib/jnats-2.17.2.jar" server.KungFuChessServer
+java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar;lib/postgresql-42.7.4.jar;lib/jedis-5.1.3.jar;lib/commons-pool2-2.12.0.jar;lib/jnats-2.17.2.jar" NetworkGuiMain
 ```
 
 Or run the server containerized, backed by PostgreSQL instead of SQLite,
@@ -370,17 +371,23 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     (form-encoded `username`/`password`, reuses `AuthController.handleAuth`
     unchanged, replies `AUTH_OK|token|rating`/`ERROR|reason`) and
     `POST /api/rooms` (form-encoded `token`, replies `ROOM_CREATED|code`).
-    `SessionTokenStore` issues/validates the bearer token these endpoints
-    hand out - multi-use within a TTL (not one-shot), since a token
-    authenticates both the WS `attach` handshake and a `POST /api/rooms`
-    call, in either order. See "REST API / scalable-server design" below
-    and `Server_Design.md` for why this split exists and what it
-    deliberately does *not* do yet.
+    `SessionTokenStore` (an interface - `InMemorySessionTokenStore` for
+    local/offline runs and every unit test, `RedisSessionTokenStore` when
+    `KFC_REDIS_URL` is set, see "REST API / scalable-server design" below)
+    issues/validates the bearer token these endpoints hand out - multi-use
+    within a TTL (not one-shot), since a token authenticates both the WS
+    `attach` handshake and a `POST /api/rooms` call, in either order. See
+    `Server_Design.md` for why this split exists and what it deliberately
+    does *not* do yet.
   - `Lobby` - the "tournament manager" (opens rooms, matches players by
     ELO, routes connections to the right `GameSession`) - a room map
-    (6-char generated code → `GameSession`), a `connection → GameSession`
-    map (for `onClose` lookups), a `username → GameSession` map (for
-    reconnect, below), and a matchmaking queue. `createRoom(username)` (called
+    (6-char generated code → `GameSession`, still always in-process - see
+    "REST API / scalable-server design" below for why), a
+    `connection → GameSession` map (for `onClose` lookups, also inherently
+    in-process - a `WebSocket` can never be shared state), a
+    `ReconnectRegistry` (`username → roomCode` - `InMemoryReconnectRegistry`
+    or `RedisReconnectRegistry`, same selection as `SessionTokenStore` above)
+    for reconnect, below, and a matchmaking queue. `createRoom(username)` (called
     from `HttpApiServer`, not the WebSocket) just mints a code and registers
     an empty `GameSession` - there's no live connection yet to seat, so
     seating always happens the normal way, via `joinRoom` once someone's
@@ -531,13 +538,21 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     at all rather than being modeled as a draw). `RatingService` is the
     thin orchestration layer around it described above - computes both new
     ratings and persists them via `UserRepository.updateRating` as one call.
-- **bus/Bus** - a generic, synchronous in-process pub/sub
-  (`subscribe(topic, handler)` / `publish(topic, payload)`).
-  `GameSession` publishes each broadcast's White-side `GameSnapshot` on
-  `"room.<code>.snapshot"`. Sound and start/end-animation triggers
+- **bus/Bus** - a pub/sub interface (`subscribe(topic, handler)` /
+  `publish(topic, String payload)` - string payloads only, not arbitrary
+  Java objects, since a real cross-process transport can only carry
+  bytes/text). `InMemoryBus` (synchronous, same-JVM fan-out - what every
+  unit test uses, and the default when `KFC_NATS_URL` isn't set) and
+  `NatsBus` (a real NATS connection - `KFC_NATS_URL` set, the Docker
+  Compose deployment) both implement it. `GameSession` publishes each
+  broadcast's White-side snapshot (already encoded to its wire-text form,
+  via `SnapshotCodec`) on `"room.<code>.snapshot"`, and each move/jump
+  event on `"room.<code>.event"`. Sound and start/end-animation triggers
   (mentioned in the original CTD 26 brief) are meant to subscribe to future
   topics on this same bus once there are concrete assets/specs for them -
-  none exist yet, so none are wired up.
+  none exist yet, so none are wired up; `NatsBus` genuinely working (not
+  just `InMemoryBus`) is what makes a real, different-process subscriber
+  possible once one exists.
 - **logging/ActivityLog** - a tiny append-only timestamped text logger
   (`synchronized log(String)`, opens/appends the file fresh each call - not
   a real logging framework). One instance server-side (`logs/server.log`,
@@ -549,18 +564,22 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
 
 A course-staff reference design (API Gateway/REST, WS Gateway, Matchmaker,
 Game Allocator, Game Server Shards, Observability; NATS/Redis, PostgreSQL,
-Docker/Kubernetes) asked for a step toward a scalable server. `Server_Design.md`
-is the full writeup - what maps to what today, and what's deliberately not
-done yet (a real Game Allocator, multiple Game Server Shards, Redis for
-`Lobby`'s in-memory state, real NATS/Redis pub-sub in place of the
-in-process `bus.Bus`, Kubernetes manifests). What *is* done, all covered
-above: login/register/room-creation moved to a REST API (`HttpApiServer`)
-sitting next to the WebSocket server in the same process; `UserRepository`
-now speaks either SQLite (local dev/tests, zero external services) or
-PostgreSQL (the Docker Compose deployment); `Dockerfile` + `docker-compose.yml`
-run the server (Postgres included) as one small, working containerized
-step - `docker compose up --build` (see "Commands" above). The Swing client
-is never containerized - it's a desktop GUI, run locally against the
+Docker/Kubernetes) asked for a step toward a scalable server, being built
+up in a small number of independently-committable steps - `Server_Design.md`
+is the full writeup, including the current roadmap and exactly what's
+deliberately not done yet at each stage (a real Game Allocator, multiple
+Game Server Shards, Kubernetes manifests - `Lobby.matchmakingQueue`
+specifically staying in-process a while longer too, see `Server_Design.md`
+for why). What *is* done so far: login/register/room-creation moved to a
+REST API (`HttpApiServer`) sitting next to the WebSocket server in the same
+process; `UserRepository` now speaks either SQLite (local dev/tests, zero
+external services) or PostgreSQL (the Docker Compose deployment);
+`SessionTokenStore`/`ReconnectRegistry` (see above) now speak either
+in-memory (same conditions) or Redis; `bus.Bus` now speaks either in-memory
+or NATS; `Dockerfile` + `docker-compose.yml` run the server (Postgres,
+Redis, and NATS included) as one small, working containerized step -
+`docker compose up --build` (see "Commands" above). The Swing client is
+never containerized - it's a desktop GUI, run locally against the
 container's exposed ports.
 
 This is phases 1-3 of a staged brief: pub/sub bus + WebSocket server + 2

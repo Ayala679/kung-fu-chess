@@ -625,7 +625,8 @@ public class GameSession {
     private void broadcastSnapshot() {
         GameSnapshot whiteView = buildSnapshotFor(Piece.Color.WHITE);
         GameSnapshot blackView = buildSnapshotFor(Piece.Color.BLACK);
-        send(whiteConnection, encode(whiteView));
+        String whiteMessage = encode(whiteView);
+        send(whiteConnection, whiteMessage);
         send(blackConnection, encode(blackView));
 
         if (!viewers.isEmpty()) {
@@ -633,7 +634,11 @@ public class GameSession {
             for (WebSocket viewer : viewers) send(viewer, neutralMessage);
         }
 
-        bus.publish(snapshotTopic, whiteView);
+        // Published as the already-encoded wire string, not the raw GameSnapshot
+        // object - a real cross-process bus (bus.NatsBus) can only carry
+        // bytes/text, not an in-JVM Java object, so this is what actually makes
+        // the payload meaningfully transmittable once a real subscriber exists.
+        bus.publish(snapshotTopic, whiteMessage);
         applyRatingChangeIfGameJustEnded(whiteView);
     }
 
