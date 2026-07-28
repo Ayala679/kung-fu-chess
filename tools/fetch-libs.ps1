@@ -9,6 +9,10 @@
 #   (both the WebSocket server and client side live in this one dependency-free jar)
 #   slf4j-api - Java-WebSocket's one runtime dependency (a logging facade only;
 #   with no binding on the classpath it just falls back to a no-op logger)
+#   sqlite-jdbc - server.auth.UserRepository, local/dev + unit tests
+#   postgresql - server.auth.UserRepository, the Docker Compose deployment (see
+#   Server_Design.md) - both jars sit on the classpath together since
+#   DriverManager picks the right one from the jdbc: URL scheme at runtime
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -37,6 +41,14 @@ $sqliteJar = Join-Path $lib "sqlite-jdbc-$sqliteVersion.jar"
 if (-not (Test-Path $sqliteJar)) {
     Write-Host "Downloading sqlite-jdbc $sqliteVersion..."
     Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/org/xerial/sqlite-jdbc/$sqliteVersion/sqlite-jdbc-$sqliteVersion.jar" -OutFile $sqliteJar
+}
+
+$postgresVersion = "42.7.4"
+$postgresJar = Join-Path $lib "postgresql-$postgresVersion.jar"
+
+if (-not (Test-Path $postgresJar)) {
+    Write-Host "Downloading postgresql $postgresVersion..."
+    Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/org/postgresql/postgresql/$postgresVersion/postgresql-$postgresVersion.jar" -OutFile $postgresJar
 }
 
 Write-Host "Libraries ready in $lib"

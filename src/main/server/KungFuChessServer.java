@@ -1,7 +1,9 @@
 package server;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.java_websocket.WebSocket;
@@ -11,56 +13,93 @@ import org.java_websocket.server.WebSocketServer;
 import bus.Bus;
 import logging.ActivityLog;
 import server.auth.AuthController;
+import server.auth.SessionTokenStore;
 import server.auth.UserRepository;
 
 /**
- * Single-process Kung Fu Chess server: accepts WebSocket connections,
- * requires a "login"/"register" (username + password, checked against a
- * SQLite-backed UserRepository) as the first message, then - once
- * authenticated - waits for exactly one lobby command ("play", "create_room",
- * or "join_room <code>") before handing the connection off to a GameSession
+ * Single-process Kung Fu Chess server: accepts WebSocket connections whose
+ * first message must be "attach <token>" (a bearer token minted by the REST
+ * login/register endpoints - see HttpApiServer - checked against a
+ * UserRepository backed by SQLite locally or PostgreSQL when deployed via
+ * Docker Compose), then - once authenticated - waits for exactly one lobby
+ * command ("play" or "join_room <code>"; room *creation* is REST-only now,
+ * see Lobby.createRoom) before handing the connection off to a GameSession
  * via Lobby. Everything about the game itself - rules, timing, captures,
  * ratings - is delegated entirely to GameSession/GameEngine, the exact same
  * classes the offline client uses.
  */
 public class KungFuChessServer extends WebSocketServer {
     public static final int DEFAULT_PORT = 8887;
+    public static final int DEFAULT_HTTP_PORT = 8888;
     private static final String DEFAULT_DB_PATH = "data/kungfuchess.db";
     private static final String DEFAULT_LOG_PATH = "logs/server.log";
 
     private final Bus bus = new Bus();
     private final ActivityLog activityLog;
     private final AuthController authController;
+    private final SessionTokenStore sessionTokenStore = new SessionTokenStore();
     private final Lobby lobby;
+    private final HttpApiServer httpApiServer;
     private final Map<WebSocket, String> usernames = new ConcurrentHashMap<>();
     private final Map<WebSocket, Integer> ratings = new ConcurrentHashMap<>();
 
     public KungFuChessServer(int port) {
-        this(port, DEFAULT_DB_PATH, DEFAULT_LOG_PATH);
+        this(port, DEFAULT_HTTP_PORT, DEFAULT_DB_PATH, DEFAULT_LOG_PATH);
     }
 
-    public KungFuChessServer(int port, String dbPath) {
-        this(port, dbPath, DEFAULT_LOG_PATH);
+    public KungFuChessServer(int port, String dbUrlOrPath) {
+        this(port, DEFAULT_HTTP_PORT, dbUrlOrPath, DEFAULT_LOG_PATH);
     }
 
-    public KungFuChessServer(int port, String dbPath, String logPath) {
+    public KungFuChessServer(int port, String dbUrlOrPath, String logPath) {
+        this(port, DEFAULT_HTTP_PORT, dbUrlOrPath, logPath);
+    }
+
+    /**
+     * @param dbUrlOrPath either a bare SQLite file path (legacy/local-dev
+     *                    behavior, unchanged) or a full JDBC URL
+     *                    (e.g. {@code jdbc:postgresql://...}) - see
+     *                    UserRepository's constructor.
+     */
+    public KungFuChessServer(int port, int httpPort, String dbUrlOrPath, String logPath) {
         super(new InetSocketAddress(port));
-        UserRepository userRepository = new UserRepository(dbPath);
+        UserRepository userRepository = new UserRepository(dbUrlOrPath);
         this.activityLog = new ActivityLog(logPath);
         this.authController = new AuthController(userRepository, activityLog);
         this.lobby = new Lobby(bus, userRepository, activityLog);
+        try {
+            this.httpApiServer = new HttpApiServer(httpPort, authController, sessionTokenStore, lobby, activityLog);
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not start HTTP API server on port " + httpPort, e);
+        }
     }
 
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
-        // Login/register happens on the connection's first text message - see onMessage.
+        // Attach happens on the connection's first text message - see onMessage.
+        activityLog.log("connection opened: " + conn.getRemoteSocketAddress());
     }
 
     // Routes by connection state: not authenticated -> handleAuth; authenticated + in a session -> session.handleCommand; authenticated, no session yet -> handleLobbyCommand.
     @Override
     public void onMessage(WebSocket conn, String message) {
+        // No per-message entry/exit log here on purpose - this fires on every
+        // click/jump during a live game, not just once per connection; the
+        // try/catch is still worth it as the one true entry point for every
+        // inbound message, regardless of which stage (auth/lobby/game) it's
+        // headed for - session.handleCommand has its own inner try/catch too
+        // (defense in depth), but auth/lobby dispatch below had none at all.
+        try {
+            doOnMessage(conn, message);
+        } catch (RuntimeException e) {
+            activityLog.log("connection " + conn.getRemoteSocketAddress() + ": onMessage(\"" + message + "\") failed unexpectedly: " + e);
+            conn.send(Protocol.ERROR + "|INTERNAL_ERROR");
+        }
+    }
+
+    private void doOnMessage(WebSocket conn, String message) {
         if (!usernames.containsKey(conn)) {
-            handleAuth(conn, message);
+            handleAttach(conn, message);
             return;
         }
 
@@ -73,33 +112,34 @@ public class KungFuChessServer extends WebSocketServer {
         handleLobbyCommand(conn, message);
     }
 
-    // Parses "login/register" via authController, replies AUTH_OK/ERROR, then calls lobby.tryReconnect on success.
-    private void handleAuth(WebSocket conn, String message) {
-        AuthController.Outcome outcome = authController.handleAuth(message);
-        if (outcome.isMalformed()) {
-            conn.send(Protocol.ERROR + "|expected 'login <username> <password>' or 'register <username> <password>'");
+    // Parses "attach <token>" (token minted by the REST login/register endpoints, see HttpApiServer), replies AUTH_OK/ERROR, then calls lobby.tryReconnect on success.
+    private void handleAttach(WebSocket conn, String message) {
+        String[] parts = message.trim().split("\\s+", 2);
+        if (parts.length < 2 || !parts[0].equals(Protocol.ATTACH)) {
+            conn.send(Protocol.ERROR + "|expected 'attach <token>'");
             conn.close();
             return;
         }
 
-        UserRepository.AuthResult auth = outcome.getResult();
-        if (!auth.isSuccess()) {
-            conn.send(Protocol.ERROR + "|" + auth.getFailureReason());
+        Optional<SessionTokenStore.Principal> principal = sessionTokenStore.validate(parts[1].trim());
+        if (principal.isEmpty()) {
+            conn.send(Protocol.ERROR + "|invalid or expired token");
             conn.close();
             return;
         }
 
-        usernames.put(conn, outcome.getUsername());
-        ratings.put(conn, auth.getRating());
-        conn.send(Protocol.AUTH_OK + "|" + auth.getRating());
+        String username = principal.get().username();
+        usernames.put(conn, username);
+        ratings.put(conn, principal.get().rating());
+        conn.send(Protocol.AUTH_OK + "|" + principal.get().rating());
 
         // If this username was seated in a game it got disconnected from,
-        // silently resume it instead of making them pick play/create/join
-        // again - see Lobby.tryReconnect / GameSession.reconnect.
-        lobby.tryReconnect(conn, outcome.getUsername());
+        // silently resume it instead of making them pick play/join again -
+        // see Lobby.tryReconnect / GameSession.reconnect.
+        lobby.tryReconnect(conn, username);
     }
 
-    // Dispatches "play"/"create_room"/"join_room <code>" to the matching Lobby method.
+    // Dispatches "play"/"join_room <code>" to the matching Lobby method (room *creation* is REST-only, see HttpApiServer/Lobby.createRoom).
     private void handleLobbyCommand(WebSocket conn, String message) {
         String username = usernames.get(conn);
         int rating = ratings.get(conn);
@@ -109,13 +149,6 @@ public class KungFuChessServer extends WebSocketServer {
         if (command.equals(Protocol.PLAY)) {
             boolean matched = lobby.play(conn, username, rating);
             if (!matched) conn.send(Protocol.WAITING);
-            return;
-        }
-
-        if (command.equals(Protocol.CREATE_ROOM)) {
-            GameSession session = lobby.createRoom(conn, username, rating);
-            conn.send(Protocol.ROOM_CREATED + "|" + session.getRoomCode());
-            // No WELCOME/STATE yet - GameSession.join greets White only once Black actually joins.
             return;
         }
 
@@ -132,11 +165,12 @@ public class KungFuChessServer extends WebSocketServer {
             return;
         }
 
-        conn.send(Protocol.ERROR + "|expected 'play', 'create_room', or 'join_room <code>'");
+        conn.send(Protocol.ERROR + "|expected 'play' or 'join_room <code>'");
     }
 
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
+        activityLog.log("connection closed: " + conn.getRemoteSocketAddress() + " (" + reason + ")");
         usernames.remove(conn);
         ratings.remove(conn);
         lobby.handleDisconnect(conn);
@@ -145,15 +179,41 @@ public class KungFuChessServer extends WebSocketServer {
     @Override
     public void onError(WebSocket conn, Exception ex) {
         ex.printStackTrace();
+        activityLog.log("WebSocket error on " + (conn == null ? "unknown connection" : conn.getRemoteSocketAddress()) + ": " + ex);
     }
 
     @Override
     public void onStart() {
-        System.out.println("Kung Fu Chess server listening on port " + getPort());
+        httpApiServer.start();
+        System.out.println("Kung Fu Chess server listening on port " + getPort()
+                + " (WS) and " + httpApiServer.getPort() + " (HTTP)");
+    }
+
+    /** Stops both the WebSocket and HTTP servers - used by main()'s shutdown hook so Docker's SIGTERM (docker compose down) shuts down cleanly instead of being killed. */
+    public void stopAll() throws InterruptedException {
+        httpApiServer.stop();
+        stop();
     }
 
     public static void main(String[] args) {
-        int port = args.length > 0 ? Integer.parseInt(args[0]) : DEFAULT_PORT;
-        new KungFuChessServer(port).start();
+        int port = args.length > 0 ? Integer.parseInt(args[0]) : envInt("KFC_WS_PORT", DEFAULT_PORT);
+        int httpPort = envInt("KFC_HTTP_PORT", DEFAULT_HTTP_PORT);
+        String dbUrlOrPath = System.getenv().getOrDefault("KFC_DB_URL", DEFAULT_DB_PATH);
+        String logPath = System.getenv().getOrDefault("KFC_LOG_PATH", DEFAULT_LOG_PATH);
+
+        KungFuChessServer server = new KungFuChessServer(port, httpPort, dbUrlOrPath, logPath);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                server.stopAll();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        server.start();
+    }
+
+    private static int envInt(String name, int defaultValue) {
+        String value = System.getenv(name);
+        return value != null ? Integer.parseInt(value) : defaultValue;
     }
 }

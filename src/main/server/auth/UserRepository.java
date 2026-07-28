@@ -9,22 +9,37 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 /**
- * Accounts, backed by a SQLite file (server-side only - see the CTD 26
- * brief's "save at SQLite db on server side"). Passwords are never stored in
- * the clear - see PasswordHasher. One connection per call rather than a
- * pool: this project has at most two players per process, so pooling would
- * be unused complexity.
+ * Accounts, backed by either a local SQLite file (the original CTD 26 brief:
+ * "save at SQLite db on server side" - still what local dev/tests use, zero
+ * external services needed) or PostgreSQL (what the Docker Compose
+ * deployment uses, see Server_Design.md - a network DB is what actually
+ * lets this data outlive/be shared beyond one process, which a per-container
+ * SQLite file can't). Passwords are never stored in the clear - see
+ * PasswordHasher. One connection per call rather than a pool: this project
+ * has at most a couple of players per process/shard, so pooling would be
+ * unused complexity - would need revisiting if this ever runs as many
+ * concurrently-loaded Game Server Shards.
  */
 public class UserRepository {
     public static final int STARTING_RATING = 1200;
 
     private final String jdbcUrl;
 
-    public UserRepository(String dbFilePath) {
-        File dbFile = new File(dbFilePath);
-        File parent = dbFile.getParentFile();
-        if (parent != null) parent.mkdirs();
-        this.jdbcUrl = "jdbc:sqlite:" + dbFilePath;
+    /**
+     * @param dbPathOrJdbcUrl a full JDBC URL (e.g. {@code jdbc:postgresql://host:5432/db?user=u&password=p})
+     *                        used as-is, or (legacy/local-dev behavior, unchanged) a bare SQLite file
+     *                        path - detected by the absence of a "jdbc:" prefix - whose parent directory
+     *                        is created and which is prefixed with "jdbc:sqlite:" for you.
+     */
+    public UserRepository(String dbPathOrJdbcUrl) {
+        if (dbPathOrJdbcUrl.startsWith("jdbc:")) {
+            this.jdbcUrl = dbPathOrJdbcUrl;
+        } else {
+            File dbFile = new File(dbPathOrJdbcUrl);
+            File parent = dbFile.getParentFile();
+            if (parent != null) parent.mkdirs();
+            this.jdbcUrl = "jdbc:sqlite:" + dbPathOrJdbcUrl;
+        }
 
         try (Connection conn = connect(); Statement st = conn.createStatement()) {
             st.execute("CREATE TABLE IF NOT EXISTS users (" +
@@ -33,7 +48,7 @@ public class UserRepository {
                     "password_hash TEXT NOT NULL, " +
                     "rating INTEGER NOT NULL)");
         } catch (SQLException e) {
-            throw new IllegalStateException("Could not initialize user database at " + dbFilePath, e);
+            throw new IllegalStateException("Could not initialize user database at " + jdbcUrl, e);
         }
     }
 

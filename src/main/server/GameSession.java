@@ -76,6 +76,7 @@ public class GameSession {
     private static final String ERROR_ILLEGAL_MOVE = "ILLEGAL_MOVE";
     private static final String ERROR_GAME_PAUSED = "GAME_PAUSED";
     private static final String ERROR_GAME_NOT_OVER = "GAME_NOT_OVER";
+    private static final String ERROR_INTERNAL = "INTERNAL_ERROR";
 
     /** What kind of action a {@link PendingAction} is watching for completion. */
     private enum ActionKind { MOVE, JUMP }
@@ -232,13 +233,21 @@ public class GameSession {
 
     // Runs every TICK_MS on the scheduler thread. Calls engine.advanceTime (skipped while isPausedForDisconnect()), then resolvePendingActions, then broadcastSnapshot.
     private void tick() {
-        synchronized (lock) {
-            if (!isPausedForDisconnect()) {
-                engine.advanceTime(TICK_MS);
+        // This runs on a java.util.concurrent.ScheduledExecutorService via
+        // scheduleAtFixedRate - an uncaught exception here would silently
+        // cancel all future ticks for this room (the executor just stops
+        // rescheduling), freezing the game with no error visible to anyone.
+        try {
+            synchronized (lock) {
+                if (!isPausedForDisconnect()) {
+                    engine.advanceTime(TICK_MS);
+                }
             }
+            resolvePendingActions();
+            broadcastSnapshot();
+        } catch (RuntimeException e) {
+            activityLog.log("room=" + roomCode + " tick() failed unexpectedly: " + e);
         }
-        resolvePendingActions();
-        broadcastSnapshot();
     }
 
     /**
@@ -252,6 +261,22 @@ public class GameSession {
      * happen given how KungFuChessServer routes messages.
      */
     public void handleCommand(WebSocket connection, String command) {
+        // No per-call entry/exit log here on purpose - a fast real-time game
+        // can generate a click/jump every few hundred milliseconds, and that
+        // volume of log lines would drown out the actually-significant
+        // events (join/disconnect/reconnect/rematch/game-over) below. The
+        // try/catch is still worth it: it's the outermost boundary that runs
+        // per network message, so nothing thrown here should ever crash the
+        // connection's read loop or leave the client without any reply.
+        try {
+            doHandleCommand(connection, command);
+        } catch (RuntimeException e) {
+            activityLog.log("room=" + roomCode + " handleCommand(\"" + command + "\") failed unexpectedly: " + e);
+            send(connection, Protocol.ERROR + "|" + ERROR_INTERNAL);
+        }
+    }
+
+    private void doHandleCommand(WebSocket connection, String command) {
         String[] parts = command.trim().split("\\s+");
 
         if (parts.length >= 1 && parts[0].equals(Protocol.REMATCH)) {
@@ -567,11 +592,15 @@ public class GameSession {
         activityLog.log("room=" + roomCode + " " + disconnectedColor + " disconnected - auto-abandon in "
                 + disconnectGraceMillis + "ms if not reconnected");
         return scheduler.schedule(() -> {
-            synchronized (lock) {
-                engine.abandon();
+            try {
+                synchronized (lock) {
+                    engine.abandon();
+                }
+                activityLog.log("room=" + roomCode + " game abandoned (disconnect timeout, no winner, no rating change)");
+                broadcastSnapshot();
+            } catch (RuntimeException e) {
+                activityLog.log("room=" + roomCode + " auto-abandon task failed unexpectedly: " + e);
             }
-            activityLog.log("room=" + roomCode + " game abandoned (disconnect timeout, no winner, no rating change)");
-            broadcastSnapshot();
         }, disconnectGraceMillis, TimeUnit.MILLISECONDS);
     }
 

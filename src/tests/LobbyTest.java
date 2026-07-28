@@ -85,8 +85,9 @@ class LobbyTest {
         FakeWebSocket alice = new FakeWebSocket();
         FakeWebSocket bob = new FakeWebSocket();
 
-        GameSession created = lobby.createRoom(alice, "alice", 1200);
-        GameSession joined = lobby.joinRoom(created.getRoomCode(), bob, "bob", 1200);
+        String code = lobby.createRoom("alice");
+        GameSession created = lobby.joinRoom(code, alice, "alice", 1200);
+        GameSession joined = lobby.joinRoom(code, bob, "bob", 1200);
 
         assertSame(created, joined);
         assertEquals(Seat.WHITE, created.seatOf(alice));
@@ -97,7 +98,8 @@ class LobbyTest {
         Lobby lobby = newLobby(tempDir);
         FakeWebSocket alice = new FakeWebSocket();
 
-        lobby.createRoom(alice, "alice", 1200);
+        String code = lobby.createRoom("alice");
+        lobby.joinRoom(code, alice, "alice", 1200);
 
         assertTrue(alice.sentMessages.isEmpty(), "the creator must not see WELCOME/STATE while alone in the room");
     }
@@ -107,8 +109,9 @@ class LobbyTest {
         FakeWebSocket alice = new FakeWebSocket();
         FakeWebSocket bob = new FakeWebSocket();
 
-        GameSession session = lobby.createRoom(alice, "alice", 1200);
-        lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
+        String code = lobby.createRoom("alice");
+        lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
 
         assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
@@ -122,9 +125,10 @@ class LobbyTest {
         FakeWebSocket bob = new FakeWebSocket();
         FakeWebSocket carol = new FakeWebSocket();
 
-        GameSession session = lobby.createRoom(alice, "alice", 1200);
-        lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
-        lobby.joinRoom(session.getRoomCode(), carol, "carol", 1200);
+        String code = lobby.createRoom("alice");
+        lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
+        lobby.joinRoom(code, carol, "carol", 1200);
 
         assertTrue(carol.sentMessages.stream().anyMatch(m -> m.equals("WELCOME|role=VIEWER")));
         assertTrue(carol.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
@@ -143,9 +147,10 @@ class LobbyTest {
         FakeWebSocket bob = new FakeWebSocket();
         FakeWebSocket carol = new FakeWebSocket();
 
-        GameSession session = lobby.createRoom(alice, "alice", 1200);
-        lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
-        lobby.joinRoom(session.getRoomCode(), carol, "carol", 1200);
+        String code = lobby.createRoom("alice");
+        GameSession session = lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
+        lobby.joinRoom(code, carol, "carol", 1200);
 
         assertEquals(Seat.VIEWER, session.seatOf(carol));
     }
@@ -154,7 +159,8 @@ class LobbyTest {
         Lobby lobby = newLobby(tempDir);
         FakeWebSocket alice = new FakeWebSocket();
 
-        GameSession session = lobby.createRoom(alice, "alice", 1200);
+        String code = lobby.createRoom("alice");
+        GameSession session = lobby.joinRoom(code, alice, "alice", 1200);
 
         assertSame(session, lobby.sessionOf(alice));
     }
@@ -200,8 +206,9 @@ class LobbyTest {
         FakeWebSocket alice = new FakeWebSocket();
         FakeWebSocket bob = new FakeWebSocket();
 
-        GameSession session = lobby.createRoom(alice, "alice", 1200);
-        lobby.joinRoom(session.getRoomCode(), bob, "bob", 1200);
+        String code = lobby.createRoom("alice");
+        GameSession session = lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
         lobby.handleDisconnect(alice);
 
         FakeWebSocket aliceAgain = new FakeWebSocket();

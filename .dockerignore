@@ -1,0 +1,9 @@
+out/
+lib/
+tools/
+data/
+logs/
+.git/
+.idea/
+.vscode/
+*.iml

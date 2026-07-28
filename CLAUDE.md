@@ -18,7 +18,9 @@ by a `tools/*.ps1` script on first use).
 ## Commands
 
 Fetch runtime dependencies once (Java-WebSocket + its slf4j-api dependency,
-and sqlite-jdbc - used by the `server`/`client` packages):
+and sqlite-jdbc + postgresql - both JDBC drivers used by the `server`/
+`client` packages; `UserRepository` picks whichever one matches the
+`jdbc:` URL scheme it's given at runtime, see "Networking" below):
 ```powershell
 powershell -File tools/fetch-libs.ps1
 ```
@@ -28,7 +30,7 @@ since `sources.txt` compiles the whole project, networking code included,
 in one `javac` invocation):
 ```bash
 cd src/main
-javac -encoding UTF-8 -cp "../../lib/Java-WebSocket-1.5.6.jar;../../lib/slf4j-api-2.0.13.jar;../../lib/sqlite-jdbc-3.46.1.3.jar" -d ../../out @sources.txt
+javac -encoding UTF-8 -cp "../../lib/Java-WebSocket-1.5.6.jar;../../lib/slf4j-api-2.0.13.jar;../../lib/sqlite-jdbc-3.46.1.3.jar;../../lib/postgresql-42.7.4.jar" -d ../../out @sources.txt
 cd ../..
 ```
 `sources.txt` (in `src/main/`) is the authoritative file list for `javac`;
@@ -54,15 +56,25 @@ fixtures under `src/tests/test_*.txt` drive):
 java -cp out Main < input.txt
 ```
 
-Run the networked server (port 8887 by default, accounts in
+Run the networked server (WebSocket on port 8887, REST API on port 8888,
+both by default - see "Networking" below; accounts in
 `data/kungfuchess.db`, activity log at `logs/server.log`) and connect to it
 with the networked GUI client (its own log at `logs/client-<username>.log`)
 - the client shows a Login/Register alert, then a Quick Play/Room alert,
 before anything else opens; see README.md for the full walkthrough:
 ```bash
-java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar" server.KungFuChessServer
-java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar" NetworkGuiMain
+java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar;lib/postgresql-42.7.4.jar" server.KungFuChessServer
+java -cp "out;lib/Java-WebSocket-1.5.6.jar;lib/slf4j-api-2.0.13.jar;lib/sqlite-jdbc-3.46.1.3.jar;lib/postgresql-42.7.4.jar" NetworkGuiMain
 ```
+
+Or run the server containerized, backed by PostgreSQL instead of SQLite,
+via Docker Compose (see `Server_Design.md` for what this does and doesn't
+cover):
+```bash
+docker compose up --build
+```
+The client (`NetworkGuiMain`, a Swing GUI) is never containerized - run it
+locally as above, pointed at `localhost:8887`.
 
 Run the full test suite + JaCoCo coverage report in one step (downloads
 JUnit console launcher + JaCoCo into `tools/` on first run, not committed):
@@ -225,12 +237,17 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
   alongside everything else (still one `javac` invocation, no build-tool
   split).
   - `Protocol` - the message prefixes specific to the network layer.
-    Client→server commands (`login`/`register`, `play`/`create_room`/
+    Login/register/room-creation are non-realtime and go over the REST API
+    (`server.HttpApiServer`, below) rather than the WebSocket - see
+    "REST API / scalable-server design" further down for the full picture.
+    On the WebSocket, client→server commands (`attach <token>`, `play`,
     `join_room <code>`, `click row col`/`jump row col`, `rematch`) stay
     space-delimited (`rematch` takes no arguments - it's just the bare
     verb). Every server→client *tagged* reply with a payload is
     pipe-delimited (`TAG|value`, matching the CTD 26 brief's own wire
-    examples): `AUTH_OK|rating`, `ROOM_CREATED|code`,
+    examples): `AUTH_OK|rating` (the WS attach reply; the REST login/register
+    reply reuses the same tag with an extra field, `AUTH_OK|token|rating`),
+    `ROOM_CREATED|code` (REST-only now, the `POST /api/rooms` reply),
     `WELCOME|role=WHITE` (greeting on being seated - the CTD brief's own
     name for this; `Seat` the Java enum is unchanged, only the wire text
     was renamed from the old `SEAT WHITE`), `ERROR|reason` (in-game
@@ -330,25 +347,45 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     "waiting..." `JDialog` that closes itself once a `Seat` (or an error)
     arrives - blocking the caller until then, same pattern `LoginDialog`
     already established. Neither dialog is folded into the board UI itself.
-- **server/** - `KungFuChessServer` (a `WebSocketServer`) is now a thin
-  transport/routing layer: it requires `login`/`register` first, then waits
-  for exactly one lobby command (`play`/`create_room`/`join_room <code>`)
-  and delegates everything about *which* game a connection ends up in to
-  `Lobby`. `onClose` calls `lobby.handleDisconnect(conn)`.
+- **server/** - `KungFuChessServer` (a `WebSocketServer`) is a thin
+  transport/routing layer: its first message must be `attach <token>` (a
+  bearer token minted by `HttpApiServer`'s REST login/register - see below),
+  then it waits for exactly one lobby command (`play`/`join_room <code>` -
+  room *creation* is REST-only now) and delegates everything about *which*
+  game a connection ends up in to `Lobby`. `onClose` calls
+  `lobby.handleDisconnect(conn)`.
+  - `HttpApiServer` - the REST half of the protocol, built on the JDK's own
+    `com.sun.net.httpserver` (no new web-framework dependency), running
+    alongside the WebSocket server in the same process on its own port
+    (`8888` by default, `8887 + 1`): `POST /api/login`/`POST /api/register`
+    (form-encoded `username`/`password`, reuses `AuthController.handleAuth`
+    unchanged, replies `AUTH_OK|token|rating`/`ERROR|reason`) and
+    `POST /api/rooms` (form-encoded `token`, replies `ROOM_CREATED|code`).
+    `SessionTokenStore` issues/validates the bearer token these endpoints
+    hand out - multi-use within a TTL (not one-shot), since a token
+    authenticates both the WS `attach` handshake and a `POST /api/rooms`
+    call, in either order. See "REST API / scalable-server design" below
+    and `Server_Design.md` for why this split exists and what it
+    deliberately does *not* do yet.
   - `Lobby` - the "tournament manager" (opens rooms, matches players by
     ELO, routes connections to the right `GameSession`) - a room map
     (6-char generated code → `GameSession`), a `connection → GameSession`
     map (for `onClose` lookups), a `username → GameSession` map (for
-    reconnect, below), and a matchmaking queue. `play(...)` scans the queue
-    for anyone within ±100 ELO; if found, both are seated into a fresh
-    session immediately. An unmatched player is removed from the queue and
-    sent an explicit `ERROR` after a configurable timeout (default 60s,
+    reconnect, below), and a matchmaking queue. `createRoom(username)` (called
+    from `HttpApiServer`, not the WebSocket) just mints a code and registers
+    an empty `GameSession` - there's no live connection yet to seat, so
+    seating always happens the normal way, via `joinRoom` once someone's
+    WebSocket sends `join_room <code>` (whoever arrives first becomes White -
+    this deliberately doesn't special-case "the creator"). `play(...)` scans
+    the queue for anyone within ±100 ELO; if found, both are seated into a
+    fresh session immediately. An unmatched player is removed from the queue
+    and sent an explicit `ERROR` after a configurable timeout (default 60s,
     matching the CTD brief's "waits up to a minute") rather than queuing
     forever - each `Waiting` entry owns its own scheduled timeout task,
     cancelled the moment it's matched or explicitly cancelled
     (`cancelQueued`).
   - **Reconnect**: `Lobby.tryReconnect(connection, username)` is called by
-    `KungFuChessServer` right after every successful login/register,
+    `KungFuChessServer` right after every successful WS `attach`,
     *before* waiting for a lobby command. If `username` was seated
     (White/Black - never a spectator) in a session it was since
     disconnected from, `GameSession.reconnect(...)` restores that exact
@@ -466,15 +503,17 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     the controller for the login/register step: calls the parser, then
     calls into `UserRepository` (the service that owns account
     logic/persistence) to carry it out, returning an `Outcome` (malformed,
-    or a `UserRepository.AuthResult`) for `KungFuChessServer.handleAuth` to
-    translate into a wire reply (`AUTH_OK`/`ERROR` + closing the
-    connection) - kept separate so this orchestration/logging isn't mixed
-    into WebSocket connection bookkeeping, and `UserRepository` never has to
-    see raw wire text at all. `UserRepository` (SQLite via `sqlite-jdbc`,
+    or a `UserRepository.AuthResult`) that its one caller, `HttpApiServer`,
+    translates into an HTTP reply (`AUTH_OK|token|rating`/`ERROR|reason`) -
+    kept separate so this orchestration/logging isn't mixed into HTTP
+    request handling, and `UserRepository` never has to see raw wire text at
+    all. `UserRepository` (`sqlite-jdbc` locally/in tests, `postgresql`
+    when deployed via Docker Compose - see "REST API / scalable-server
+    design" below - picked by the `jdbc:` URL scheme it's constructed with;
     `CREATE TABLE IF NOT EXISTS` on construction, one connection per call -
-    no pooling, there are at most two players per game) owns accounts:
-    `register`/`authenticate` (returning an `AuthResult` with either a
-    rating or a failure reason) and `updateRating`. `PasswordHasher` is
+    no pooling, there are at most a couple of players per process/shard)
+    owns accounts: `register`/`authenticate` (returning an `AuthResult`
+    with either a rating or a failure reason) and `updateRating`. `PasswordHasher` is
     salted SHA-256 - no bcrypt/argon2 dependency, adequate for this
     project's scope; a password is never stored or compared in the clear.
     `EloCalculator` is a pure, stateless standard ELO formula (K=32, no
@@ -496,6 +535,24 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
   shared across all of `KungFuChessServer`/`Lobby`/every `GameSession`);
   each `NetworkGameClient` creates its own (`logs/client-<username>.log`,
   lazily once the username is known) and logs what it sends/receives.
+
+### REST API / scalable-server design
+
+A course-staff reference design (API Gateway/REST, WS Gateway, Matchmaker,
+Game Allocator, Game Server Shards, Observability; NATS/Redis, PostgreSQL,
+Docker/Kubernetes) asked for a step toward a scalable server. `Server_Design.md`
+is the full writeup - what maps to what today, and what's deliberately not
+done yet (a real Game Allocator, multiple Game Server Shards, Redis for
+`Lobby`'s in-memory state, real NATS/Redis pub-sub in place of the
+in-process `bus.Bus`, Kubernetes manifests). What *is* done, all covered
+above: login/register/room-creation moved to a REST API (`HttpApiServer`)
+sitting next to the WebSocket server in the same process; `UserRepository`
+now speaks either SQLite (local dev/tests, zero external services) or
+PostgreSQL (the Docker Compose deployment); `Dockerfile` + `docker-compose.yml`
+run the server (Postgres included) as one small, working containerized
+step - `docker compose up --build` (see "Commands" above). The Swing client
+is never containerized - it's a desktop GUI, run locally against the
+container's exposed ports.
 
 This is phases 1-3 of a staged brief: pub/sub bus + WebSocket server + 2
 players; SQLite-backed accounts + ELO rating; ELO-ranged quick-match,

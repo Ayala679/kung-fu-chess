@@ -42,16 +42,30 @@ public class AuthController {
         public UserRepository.AuthResult getResult() { return result; }
     }
 
-    /** Parses {@code message} via {@link AuthCommandParser} and delegates to {@link UserRepository#register} or {@link UserRepository#authenticate}. */
+    /**
+     * Parses {@code message} via {@link AuthCommandParser} and delegates to
+     * {@link UserRepository#register} or {@link UserRepository#authenticate}.
+     * Guards against an unexpected failure in the repository (e.g. the
+     * SQLite file becoming unreadable mid-session) - without this, an
+     * uncaught exception here would propagate all the way up through
+     * server.KungFuChessServer.onMessage's own try/catch, leaving the
+     * connection with no reply at all instead of a clean ERROR.
+     */
     public Outcome handleAuth(String message) {
         AuthCommandParser.ParsedCommand parsed = AuthCommandParser.parse(message);
         if (parsed == null) {
             return Outcome.malformed();
         }
 
-        UserRepository.AuthResult result = parsed.mode() == AuthCommandParser.Mode.REGISTER
-                ? userRepository.register(parsed.username(), parsed.password())
-                : userRepository.authenticate(parsed.username(), parsed.password());
+        UserRepository.AuthResult result;
+        try {
+            result = parsed.mode() == AuthCommandParser.Mode.REGISTER
+                    ? userRepository.register(parsed.username(), parsed.password())
+                    : userRepository.authenticate(parsed.username(), parsed.password());
+        } catch (RuntimeException e) {
+            activityLog.log("AUTH_ERROR " + parsed.username() + ": " + e);
+            return Outcome.of(parsed.username(), UserRepository.AuthResult.failure("internal error - please try again"));
+        }
 
         if (!result.isSuccess()) {
             activityLog.log("AUTH_FAILED " + parsed.username() + ": " + result.getFailureReason());

@@ -38,6 +38,7 @@ ruleengine/MoveValidator.java
 ruleengine/PieceRules.java
 ruleengine/RuleEngine.java
 server/GameSession.java
+server/HttpApiServer.java
 server/KungFuChessServer.java
 server/Lobby.java
 server/Protocol.java
@@ -48,6 +49,7 @@ server/auth/AuthController.java
 server/auth/EloCalculator.java
 server/auth/PasswordHasher.java
 server/auth/RatingService.java
+server/auth/SessionTokenStore.java
 server/auth/UserRepository.java
 snapshot/GameSnapshot.java
 snapshot/MoveNotation.java

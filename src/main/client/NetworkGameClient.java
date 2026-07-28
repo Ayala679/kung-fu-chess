@@ -1,6 +1,12 @@
 package client;
 
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -15,8 +21,8 @@ import server.SnapshotCodec;
 import snapshot.GameSnapshot;
 
 /**
- * Client-side counterpart to server.KungFuChessServer/Lobby/GameSession.
- * Two stages: authenticate (login/register), then pick a game (quick-match
+ * Client-side counterpart to server.KungFuChessServer/HttpApiServer/Lobby/
+ * GameSession. Two stages: authenticate, then pick a game (quick-match
  * "play", or create/join a room) - the latter is inherently asynchronous
  * (the server may reply WAITING and only send a WELCOME once an opponent
  * actually arrives), so it's callback-driven via {@link LobbyListener}
@@ -24,6 +30,13 @@ import snapshot.GameSnapshot;
  * view.BoardWindow's clicks/jumps into text frames and exposes whatever
  * GameSnapshot the server most recently pushed. waitFor() is a no-op: the
  * server is the only real clock.
+ *
+ * Login/register/room-creation are non-realtime and go over REST
+ * (server.HttpApiServer) rather than this WebSocket - see authenticate()/
+ * createRoom(). The HTTP API's port is the WebSocket port + 1 by
+ * convention (8888 alongside the default WS port 8887); there's no separate
+ * server-address field in the login UI to carry a second port, so this is
+ * derived rather than configured - see Server_Design.md.
  */
 public class NetworkGameClient extends WebSocketClient implements GameClient {
     /** Callbacks for what happens after authentication, while picking a game - always delivered off the Swing thread. */
@@ -34,9 +47,11 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         void onLobbyError(String message);
     }
 
+    private final HttpClient httpClient = HttpClient.newHttpClient();
     private final CountDownLatch authComplete = new CountDownLatch(1);
     private final CountDownLatch firstSnapshot = new CountDownLatch(1);
     private volatile int rating;
+    private volatile String sessionToken;
     private volatile String serverError;
     private volatile Seat assignedSeat;
     private volatile String roomCode;
@@ -50,24 +65,37 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         super(serverUri);
     }
 
-    /** Connects and creates a new account. Blocks until AUTH_OK or a refusal. */
+    /** Registers a new account (REST) and attaches this connection to it (WS). Blocks until AUTH_OK or a refusal. */
     public void register(String username, String password, long timeoutSeconds) throws Exception {
         authenticate(Protocol.REGISTER, username, password, timeoutSeconds);
     }
 
-    /** Connects and signs into an existing account. Blocks until AUTH_OK or a refusal. */
+    /** Signs into an existing account (REST) and attaches this connection to it (WS). Blocks until AUTH_OK or a refusal. */
     public void login(String username, String password, long timeoutSeconds) throws Exception {
         authenticate(Protocol.LOGIN, username, password, timeoutSeconds);
     }
 
     private void authenticate(String mode, String username, String password, long timeoutSeconds) throws Exception {
         activityLog = new ActivityLog("logs/client-" + username + ".log");
+
+        activityLog.log("HTTP POST /api/" + mode + " for " + username);
+        HttpResponse<String> response = postForm("/api/" + mode, "username=" + urlEncode(username) + "&password=" + urlEncode(password), timeoutSeconds);
+        String body = response.body().trim();
+        if (!body.startsWith(Protocol.AUTH_OK + "|")) {
+            String reason = body.startsWith(Protocol.ERROR + "|") ? body.substring(Protocol.ERROR.length() + 1) : body;
+            activityLog.log("REST auth refused: " + reason);
+            throw new IllegalStateException("Refused: " + reason);
+        }
+        String[] parts = body.substring(Protocol.AUTH_OK.length() + 1).split("\\|", 2);
+        sessionToken = parts[0];
+        rating = Integer.parseInt(parts[1].trim());
+
         activityLog.log("connecting to " + getURI());
         if (!connectBlocking(timeoutSeconds, TimeUnit.SECONDS)) {
             throw new IllegalStateException("Could not connect to " + getURI());
         }
-        activityLog.log(mode + " " + username);
-        send(mode + " " + username + " " + password);
+        activityLog.log("attach " + username);
+        send(Protocol.ATTACH + " " + sessionToken);
         if (!authComplete.await(timeoutSeconds, TimeUnit.SECONDS)) {
             throw new IllegalStateException("Server did not respond to authentication in time");
         }
@@ -86,9 +114,41 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         send(Protocol.PLAY);
     }
 
+    /** REST-creates a fresh room, reports the code to the LobbyListener directly, then joins it over the WebSocket (seated White, being first to arrive). */
     public void createRoom() {
-        activityLog.log("create_room");
-        send(Protocol.CREATE_ROOM);
+        try {
+            activityLog.log("HTTP POST /api/rooms");
+            HttpResponse<String> response = postForm("/api/rooms", "token=" + urlEncode(sessionToken), 10);
+            String body = response.body().trim();
+            if (!body.startsWith(Protocol.ROOM_CREATED + "|")) {
+                String reason = body.startsWith(Protocol.ERROR + "|") ? body.substring(Protocol.ERROR.length() + 1) : body;
+                activityLog.log("create_room refused: " + reason);
+                if (lobbyListener != null) lobbyListener.onLobbyError(reason);
+                return;
+            }
+            roomCode = body.substring(Protocol.ROOM_CREATED.length() + 1).trim();
+            activityLog.log("room created: " + roomCode);
+            if (lobbyListener != null) lobbyListener.onRoomCreated(roomCode);
+            joinRoom(roomCode);
+        } catch (Exception e) {
+            activityLog.log("create_room failed: " + e);
+            if (lobbyListener != null) lobbyListener.onLobbyError(e.getMessage());
+        }
+    }
+
+    private HttpResponse<String> postForm(String path, String formBody, long timeoutSeconds) throws Exception {
+        URI wsUri = getURI();
+        URI httpUri = new URI("http", null, wsUri.getHost(), wsUri.getPort() + 1, path, null, null);
+        HttpRequest request = HttpRequest.newBuilder(httpUri)
+                .timeout(Duration.ofSeconds(timeoutSeconds))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(formBody))
+                .build();
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     public void joinRoom(String roomCode) {
@@ -111,7 +171,7 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         return assignedSeat;
     }
 
-    /** The room code, once known - set by ROOM_CREATED (creator) or whatever was passed to joinRoom(). */
+    /** The room code, once known - set by the REST createRoom() response, or whatever was passed to joinRoom(). */
     public String getRoomCode() {
         return roomCode;
     }
@@ -149,22 +209,18 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
 
     @Override
     public void onOpen(ServerHandshake handshakedata) {
-        // login/register is sent explicitly once the socket is open - see authenticate()
+        // "attach <token>" is sent explicitly once the socket is open - see authenticate()
     }
 
     @Override
     public void onMessage(String message) {
         if (message.startsWith(Protocol.AUTH_OK + "|")) {
             rating = Integer.parseInt(message.substring(Protocol.AUTH_OK.length() + 1).trim());
-            activityLog.log("authenticated, rating=" + rating);
+            activityLog.log("attached, rating=" + rating);
             authComplete.countDown();
         } else if (message.equals(Protocol.WAITING)) {
             activityLog.log("waiting for an opponent");
             if (lobbyListener != null) lobbyListener.onWaiting();
-        } else if (message.startsWith(Protocol.ROOM_CREATED + "|")) {
-            roomCode = message.substring(Protocol.ROOM_CREATED.length() + 1).trim();
-            activityLog.log("room created: " + roomCode);
-            if (lobbyListener != null) lobbyListener.onRoomCreated(roomCode);
         } else if (message.startsWith(Protocol.WELCOME + "|role=")) {
             assignedSeat = Seat.valueOf(message.substring((Protocol.WELCOME + "|role=").length()).trim());
             activityLog.log("seated as " + assignedSeat);

@@ -1,9 +1,20 @@
 package server;
 
 /**
- * Message prefixes for the client<->server text protocol. Board commands
- * ("click row col" / "jump row col") aren't listed here - they're parsed
- * directly by server.GameSession, which already knows the format.
+ * Message prefixes for the client<->server protocol - both the WebSocket
+ * text protocol and the small REST API (server.HttpApiServer) sitting next
+ * to it. Board commands ("click row col" / "jump row col") aren't listed
+ * here - they're parsed directly by server.GameSession, which already knows
+ * the format.
+ *
+ * login/register/room-creation are non-realtime and go over REST now (see
+ * HttpApiServer) - LOGIN/REGISTER below stay as the internal mode markers
+ * reused when building the string passed into AuthController.handleAuth,
+ * and AUTH_OK/ROOM_CREATED/ERROR are reused verbatim as HTTP response
+ * bodies. Everything actually live (matchmaking wait, gameplay, state)
+ * stays on the WebSocket: the connection's first message is now
+ * "attach &lt;token&gt;" (a token minted by the REST login/register call)
+ * instead of raw login/register text.
  *
  * Client -> server commands stay space-delimited (unchanged from before).
  * Every server -> client tagged message with a payload is pipe-delimited
@@ -14,22 +25,25 @@ package server;
 public final class Protocol {
     private Protocol() {}
 
-    /** Client -> server, first message on a new connection: {@code "login <username> <password>"}. */
+    /** Internal auth mode marker (REST path suffix / AuthController.handleAuth prefix), not a WS verb any more. */
     public static final String LOGIN = "login";
 
-    /** Client -> server, first message for a new account: {@code "register <username> <password>"}. */
+    /** Internal auth mode marker (REST path suffix / AuthController.handleAuth prefix), not a WS verb any more. */
     public static final String REGISTER = "register";
 
-    /** Server -> client, sent right after a successful login/register: {@code "AUTH_OK|<rating>"}. */
+    /** WS client -> server, first message on a new connection: {@code "attach <token>"} (token from the REST login/register call). */
+    public static final String ATTACH = "attach";
+
+    /** Reply to REST login/register, and to the WS attach handshake: {@code "AUTH_OK|<rating>"} (REST also appends the token: {@code "AUTH_OK|<token>|<rating>"}). */
     public static final String AUTH_OK = "AUTH_OK";
 
     /** Client -> server, sent once authenticated: join the ELO-ranged matchmaking queue. */
     public static final String PLAY = "play";
 
-    /** Client -> server, sent once authenticated: create a new room, seated as White. */
+    /** REST client -> server, {@code POST /api/rooms} body {@code token=<token>}: mints a fresh room code, no seat yet. */
     public static final String CREATE_ROOM = "create_room";
 
-    /** Client -> server, sent once authenticated: {@code "join_room <code>"} - seated Black, or a VIEWER if already full. */
+    /** Client -> server, sent once authenticated: {@code "join_room <code>"} - seated White if the room is still empty, Black if one seat is taken, or a VIEWER if already full. */
     public static final String JOIN_ROOM = "join_room";
 
     /** Client -> server, sent by either seated player once the game is over: requests a fresh rematch in the same room. */
@@ -38,7 +52,7 @@ public final class Protocol {
     /** Server -> client, still waiting for an opponent (quick-match or an empty room seat). No payload. */
     public static final String WAITING = "WAITING";
 
-    /** Server -> client, reply to create_room: {@code "ROOM_CREATED|<code>"}. */
+    /** REST response body for {@code POST /api/rooms}: {@code "ROOM_CREATED|<code>"}. */
     public static final String ROOM_CREATED = "ROOM_CREATED";
 
     /** Server -> client, sent once seated in a game: {@code "WELCOME|role=WHITE"} / {@code "WELCOME|role=BLACK"} / {@code "WELCOME|role=VIEWER"}. */

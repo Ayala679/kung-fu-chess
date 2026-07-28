@@ -67,16 +67,20 @@ public class Lobby {
         return sessionByConnection.get(connection);
     }
 
-    /** "create_room": a fresh room, this connection seated White. */
-    public GameSession createRoom(WebSocket connection, String username, int rating) {
+    /**
+     * REST "create room" (server.HttpApiServer): mints a fresh room code and
+     * registers an empty GameSession - no seat yet, since a REST call has no
+     * live connection to seat. The creator (and anyone they share the code
+     * with) actually gets seated the normal way, via joinRoom once their
+     * WebSocket sends "join_room &lt;code&gt;" - whoever arrives first there
+     * becomes White, so this deliberately doesn't special-case "the creator".
+     */
+    public String createRoom(String username) {
         String code = newRoomCode();
         GameSession session = new GameSession(bus, code, userRepository, activityLog);
         rooms.put(code, session);
-        session.join(connection, username, rating);
-        sessionByConnection.put(connection, session);
-        sessionByUsername.put(username, session);
-        activityLog.log("room=" + code + " created by " + username);
-        return session;
+        activityLog.log("room=" + code + " reserved by " + username);
+        return code;
     }
 
     /** "join_room <code>" - null if the code doesn't exist (caller sends an ERROR). */
@@ -86,6 +90,7 @@ public class Lobby {
         session.join(connection, username, rating);
         sessionByConnection.put(connection, session);
         sessionByUsername.put(username, session);
+        activityLog.log("room=" + code + " joined by " + username);
         return session;
     }
 
