@@ -19,8 +19,8 @@ kept fully working end to end before moving on:
    creation moved to REST; PostgreSQL for the deployed path.
 3. ✅ **Redis (shared state) + NATS (internal bus)** - still one process;
    laid the groundwork step 4 actually needed.
-4. ✅ **API Gateway split** into its own process - this step.
-5. ⬜ **WebSocket Gateway split** from the Game Server Shard.
+4. ✅ **API Gateway split** into its own process.
+5. ✅ **WebSocket Gateway split** from the Game Server Shard - this step.
 6. ⬜ **Game Allocator + multiple Game Server Shards.**
 7. ⬜ **Observability + Kubernetes/K3s manifests.**
 
@@ -29,15 +29,15 @@ kept fully working end to end before moving on:
 | Reference design | This project, today |
 |---|---|
 | API Gateway (REST: login, rooms, history) | `server.HttpApiServer` - `POST /api/login`, `POST /api/register`, `POST /api/rooms`. Runs as its own process, `server.ApiGateway`, in the Docker Compose deployment (see "Step 4" below) - separate from the WS Gateway/Game Server Shard, talking to it only over NATS request-reply. Still embeds in the same process for local/offline runs (no Redis/NATS configured). |
-| WS Gateway (live connections, state updates) | `server.KungFuChessServer` (a `WebSocketServer`). First message is `attach <token>` (a bearer token minted by the REST login/register call); once attached, `play`/`join_room <code>`/`click`/`jump`/`rematch` are unchanged from before this iteration. Still bundled with the one Game Server Shard - see step 5. |
-| Matchmaker | `server.Lobby.play(...)` - ELO-ranged (±100) matchmaking queue, in-process. |
+| WS Gateway (live connections, state updates) | `server.KungFuChessServer`, now a genuinely separate process/container (`ws-gateway`) from the Game Server Shard in the Docker Compose deployment - see "Step 5" below. First message is still `attach <token>`; once attached, every command (`play`/`join_room <code>`/`click`/`jump`/`rematch`) is relayed to the Shard over NATS rather than handled in-process. Still embeds `Lobby`/`GameSession` directly for local/offline runs (no Redis/NATS configured), unchanged. |
+| Matchmaker | `server.Lobby.play(...)` - ELO-ranged (±100) matchmaking queue. Lives inside the Game Server Shard now (`server.GameServerShard`), reached by the WS Gateway only through the NATS relay described in "Step 5". |
 | Game Allocator (decides which shard runs a room) | **Not implemented.** There's only ever one Game Server Shard (see below), so there's nothing to allocate between yet. |
-| Game Server Shards (authoritative GameEngine, many instances) | `server.GameSession` + `gameengine.GameEngine` - exactly the same engine the offline client uses. Always exactly **one** shard: the same JVM as the WS/API Gateway. |
+| Game Server Shards (authoritative GameEngine, many instances) | `server.GameSession` + `gameengine.GameEngine` - exactly the same engine the offline client uses. Now its own process, `server.GameServerShard` (see "Step 5"), separate from the WS/API Gateways. Always exactly **one** shard - see step 6. |
 | Observability (logs, metrics, health checks, load tests) | `logging.ActivityLog` only (append-only text log, server-side + one per client). No metrics, no health-check endpoint, no load tests. |
-| NATS / Redis (internal pub-sub between services) | `bus.Bus` - an interface now. `InMemoryBus` (local/offline runs, every unit test) or `NatsBus` (a real NATS connection, `KFC_NATS_URL` set - the Docker Compose deployment). Genuinely cross-process-capable now, but there's still only one process publishing *or* subscribing - see "Still one process". |
-| Redis (sessions, active rooms, reconnect, matchmaking queue) | **Partly done** - see "Step 3" below for exactly what moved to Redis and what's deliberately still in-process (`Lobby.rooms`/`sessionByConnection`/`matchmakingQueue`, and `KungFuChessServer`'s `usernames`/`ratings`). |
+| NATS / Redis (internal pub-sub between services) | `bus.Bus` - an interface now. `InMemoryBus` (local/offline runs, every unit test) or `NatsBus` (a real NATS connection, `KFC_NATS_URL` set - the Docker Compose deployment). Genuinely in active cross-process use as of step 5 - see below - not just a ready-but-unused abstraction any more. |
+| Redis (sessions, active rooms, reconnect, matchmaking queue) | **Partly done** - see "Step 3" below for exactly what moved to Redis and what's deliberately still in-process (`Lobby.rooms`/`sessionByConnection`/`matchmakingQueue`). |
 | PostgreSQL (users, games, results, move history) | `server.auth.UserRepository` now speaks PostgreSQL when deployed via Docker Compose (see below) - `users` table only (accounts + rating). No `games`/`results`/move-history tables exist yet - move history lives only in each `GameSession`'s in-memory log, never persisted. |
-| Docker Compose (small runnable version) | `Dockerfile` + `docker-compose.yml` at the repo root - `docker compose up --build` runs 5 containers: `postgres`, `redis`, `nats`, `server` (WS Gateway + Game Server Shard), `api-gateway`. |
+| Docker Compose (small runnable version) | `Dockerfile` + `docker-compose.yml` at the repo root - `docker compose up --build` runs 6 containers: `postgres`, `redis`, `nats`, `ws-gateway`, `game-server-shard`, `api-gateway`. |
 | Kubernetes / K3s | Not started. |
 
 ## Step 3: Redis (shared state) + NATS (internal bus)
@@ -63,12 +63,14 @@ with:
   test, and any local/offline run).
 - **Stayed in-process**: `Lobby.rooms` (`roomCode → GameSession` - the
   `GameSession` objects themselves only ever live in one JVM at this
-  stage anyway), `Lobby.sessionByConnection` (`WebSocket → GameSession` -
-  inherently local, this will *never* move to Redis in any future step
-  either), and `Lobby.matchmakingQueue` (today it stores live `WebSocket`
-  refs alongside username/rating; moving just the data half to Redis now
-  would add complexity with zero payoff until step 4/5 actually gives a
-  second process something to read it from - revisit then).
+  stage anyway), `Lobby.sessionByConnection` (`OutboundConnection →
+  GameSession` - inherently local to whichever process holds the real
+  connection identity, this will *never* move to Redis in any future step
+  either), and `Lobby.matchmakingQueue` (today it stores a connection
+  reference alongside username/rating; moving just the data half to Redis
+  now would add complexity with zero payoff until step 6 actually gives a
+  second Game Server Shard process something to read it from - revisit
+  then).
 
 `bus.Bus` became an interface the same way `SessionTokenStore` did.
 `InMemoryBus` is today's exact old behavior, renamed; `NatsBus` wraps a
@@ -132,6 +134,82 @@ way to know (or need to know) that its REST calls now land in a different
 container than its WebSocket does - which is exactly the point of a clean
 split.
 
+## Step 5: WebSocket Gateway split from the Game Server Shard
+
+The step this document itself already flagged as "the biggest remaining
+step" - `server.KungFuChessServer` was both the WS Gateway *and* the Game
+Server Shard in one process; this splits them for real, matching the
+reference diagram's WS Gateway ↔ NATS ↔ Game Server Shards arrows.
+
+**The key decision: a type substitution, not a rewrite of `GameSession`.**
+`GameSession`/`Lobby` addressed White, Black, and every viewer directly as
+`org.java_websocket.WebSocket`, calling `.send()`/`.isOpen()` on it for
+*every* outbound message (`WELCOME`, `STATE`, `EVENT`, `ERROR`,
+`COMMAND_RESULT`, `OPPONENT_DISCONNECTED`/`RECONNECTED`) - already the
+entire outbound mechanism. Once the Shard is a separate process it can
+never hold a real `WebSocket` (same constraint as `GameSession` itself
+in step 3/4). Rather than redesigning that addressing model around NATS
+broadcast topics, a small interface -
+
+```java
+interface OutboundConnection { void send(String message); boolean isOpen(); }
+```
+
+- replaces `WebSocket` as `GameSession`/`Lobby`'s field/parameter type,
+**with no other logic change at all**. `LocalOutboundConnection` wraps a
+real `WebSocket` (the still-supported embedded/local topology);
+`RemoteOutboundConnection` wraps a `connectionId` and publishes to
+`"conn.<connectionId>.out"` - the Gateway is already subscribed to it per
+connection and relays verbatim to the real socket.
+
+This is what kept the step's risk contained despite its size: the existing
+test double, `tests.FakeWebSocket`, already had matching `send`/`isOpen`
+methods, so making it also `implements OutboundConnection` meant
+`LobbyTest`/`GameSessionTest` needed **no other changes** - every existing
+test keeps exercising the exact same `Lobby`/`GameSession` logic, just
+through the new interface.
+
+**The Gateway needed no request-reply at all - just fire-and-forget.**
+Since every outbound reply (including immediate acks like
+`COMMAND_RESULT|SUCCESS`/`WAITING`/`ERROR|unknown room code`) already
+flows back out through `OutboundConnection.send()`, the Gateway doesn't
+need to correlate a request with its response the way `RemoteRoomCreator`
+(step 4) does - it just publishes and moves on:
+
+- WS open → generate a `connectionId`, subscribe to its own
+  `"conn.<connectionId>.out"`, relay whatever arrives there to the socket.
+- WS message, pre-attach → handled 100% locally (`SessionTokenStore` is
+  already Redis-backed and directly reachable); on success, fire-and-forget
+  publish `"gateway.reconnect"` (today's `Lobby.tryReconnect` return value
+  was already ignored by its caller, confirmed before making this
+  fire-and-forget).
+- WS message, post-attach → fire-and-forget publish `"gateway.command"`
+  with a `GatewayCommandEnvelope` (`connectionId|username|rating|rawCommand`)
+  - `server.GameServerShard` decides routing using the *same* logic
+  `KungFuChessServer.doOnMessage`/`handleLobbyCommand` already had, just
+  moved onto the Shard and keyed by `connectionId`.
+- WS close → fire-and-forget publish `"gateway.disconnect"`
+  (`connectionId`), then unsubscribe locally.
+
+The Gateway ends up with **no** `Lobby`/`GameSession`/`UserRepository`
+reference at all in the distributed topology - genuinely just a relay.
+`server.GameServerShard` (new class + `main`) is the real Game Server
+Shard from now on: owns `UserRepository`, `Lobby`, and (moved here from
+`KungFuChessServer`) `RoomCreationResponder`; caches one
+`RemoteOutboundConnection` per `connectionId` (map lookups like
+`sessionByConnection.get(connection)` need the *same* instance handed back
+across multiple messages, exactly like the Gateway already relies on real
+`WebSocket` reference identity today).
+
+**Topology inferred the same way as steps 3/4** - `KFC_REDIS_URL` and
+`KFC_NATS_URL` both set → `KungFuChessServer` is the pure relay described
+above; either unset → unchanged local/offline embedding.
+`docker-compose.yml`'s `server` service is renamed `ws-gateway` (matching
+`api-gateway`'s naming now that both are thin relays), and a new
+`game-server-shard` service runs `server.GameServerShard` - no published
+port, only reachable over NATS/Redis/Postgres, exactly like a real
+internal service.
+
 ## What changed in step 2 (REST + PostgreSQL)
 
 1. **Login/register/room-creation moved off the WebSocket, onto REST.**
@@ -190,30 +268,23 @@ split.
    it runs locally against the container's exposed ports (8887 WS, 8888
    HTTP).
 
-## Still one process for the WS Gateway + Game Server Shard
+## All three Gateway/Matchmaker/Shard roles are now separate processes
 
-The API Gateway is now genuinely separate (step 4), but `KungFuChessServer`
-still bundles the WS Gateway and the one Game Server Shard together in a
-single JVM / container. This is a deliberate scope decision, not the end
-state: a live `WebSocket` connection and a `GameSession` are still things
-only one process can hold, and splitting the Gateway from the Shard means
-the Gateway would need to forward every `click`/`jump`/`play`/`join_room`
-over NATS and relay `STATE`/`EVENT` broadcasts back - real, non-trivial
-work, exactly what step 5 is for. Attempting a full split into
-independently deployable services in one pass risked landing "a lot that
-doesn't run" instead of "a small step that works" - the explicit
-instruction behind this whole roadmap.
+`api-gateway`, `ws-gateway`, and `game-server-shard` are three genuinely
+independent containers as of step 5, talking to each other only over
+NATS/Redis/Postgres - none of them hold a direct Java reference into
+either of the others. What's still a deliberate scope decision, not the
+end state: there's only ever **one** Game Server Shard process, so there's
+nothing yet for a Game Allocator to allocate between - that's step 6.
 
 ## Not done yet (future work)
 
-- **WebSocket Gateway split from the Game Server Shard** (step 5) - the
-  biggest remaining step: `KungFuChessServer` forwarding commands to a
-  separate shard process over NATS instead of calling `GameSession`
-  directly, and relaying `STATE`/`EVENT` broadcasts back the same way.
-- **Game Allocator + multiple Game Server Shards** (step 6). Needs the
-  Redis-backed state from step 3 (already in place) plus the Gateway split
-  above, so an allocator can hand a new room to any of several shard
-  processes and a Gateway can find which shard owns a given room.
+- **Game Allocator + multiple Game Server Shards** (step 6) - the biggest
+  remaining step. Needs a component deciding which of several shard
+  processes a new room goes to, and `ws-gateway` needing to know which
+  shard owns a given room's `connectionId` (today it just publishes to one
+  fixed `"gateway.command"` subject, since there's only one shard
+  listening).
 - **`Lobby.matchmakingQueue` moving to Redis** - deliberately deferred to
   step 6 alongside the Game Allocator, since it only gains real value once
   there's more than one process that needs to see the same queue (see

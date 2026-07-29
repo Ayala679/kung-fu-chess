@@ -11,15 +11,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
-import org.java_websocket.WebSocket;
-
 import bus.Bus;
 import logging.ActivityLog;
 import server.auth.UserRepository;
 
 /**
  * The "tournament manager": opens rooms, matches waiting players by ELO, and
- * hands each WebSocket connection off to the right GameSession. Everything
+ * hands each connection off to the right GameSession. Everything
  * about actually playing a game - including greeting a connection once it's
  * actually seated (WELCOME + board snapshot) - is delegated entirely to
  * GameSession/GameEngine; this class only ever decides WHICH session a
@@ -46,7 +44,7 @@ public class Lobby {
     });
 
     private final Map<String, GameSession> rooms = new ConcurrentHashMap<>();
-    private final Map<WebSocket, GameSession> sessionByConnection = new ConcurrentHashMap<>();
+    private final Map<OutboundConnection, GameSession> sessionByConnection = new ConcurrentHashMap<>();
     private final List<Waiting> matchmakingQueue = new ArrayList<>();
 
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry) {
@@ -81,7 +79,7 @@ public class Lobby {
         this.disconnectGraceMillis = disconnectGraceMillis;
     }
 
-    public GameSession sessionOf(WebSocket connection) {
+    public GameSession sessionOf(OutboundConnection connection) {
         return sessionByConnection.get(connection);
     }
 
@@ -90,7 +88,7 @@ public class Lobby {
      * registers an empty GameSession - no seat yet, since a REST call has no
      * live connection to seat. The creator (and anyone they share the code
      * with) actually gets seated the normal way, via joinRoom once their
-     * WebSocket sends "join_room &lt;code&gt;" - whoever arrives first there
+     * client sends "join_room &lt;code&gt;" - whoever arrives first there
      * becomes White, so this deliberately doesn't special-case "the creator".
      */
     public String createRoom(String username) {
@@ -102,7 +100,7 @@ public class Lobby {
     }
 
     /** "join_room <code>" - null if the code doesn't exist (caller sends an ERROR). */
-    public GameSession joinRoom(String code, WebSocket connection, String username, int rating) {
+    public GameSession joinRoom(String code, OutboundConnection connection, String username, int rating) {
         GameSession session = rooms.get(code);
         if (session == null) return null;
         session.join(connection, username, rating);
@@ -126,7 +124,7 @@ public class Lobby {
      * this: what happens once such a player instead asks for a genuinely
      * new game.
      */
-    public boolean tryReconnect(WebSocket connection, String username) {
+    public boolean tryReconnect(OutboundConnection connection, String username) {
         Optional<String> roomCode = reconnectRegistry.roomCodeFor(username);
         if (roomCode.isEmpty()) return false;
         GameSession session = rooms.get(roomCode.get());
@@ -153,7 +151,7 @@ public class Lobby {
      * session at all - so the caller knows whether it actually needs to
      * detach anything.
      */
-    public boolean leaveFinishedSessionIfAny(WebSocket connection) {
+    public boolean leaveFinishedSessionIfAny(OutboundConnection connection) {
         GameSession session = sessionByConnection.get(connection);
         if (session == null || !session.isGameOver()) return false;
         session.handleDisconnect(connection);
@@ -171,7 +169,7 @@ public class Lobby {
      * {@link #matchmakingTimeoutMillis}, it's removed from the queue and
      * sent an explicit ERROR instead of waiting forever.
      */
-    public synchronized boolean play(WebSocket connection, String username, int rating) {
+    public synchronized boolean play(OutboundConnection connection, String username, int rating) {
         for (int i = 0; i < matchmakingQueue.size(); i++) {
             Waiting candidate = matchmakingQueue.get(i);
             if (Math.abs(candidate.rating - rating) <= MATCHMAKING_ELO_RANGE) {
@@ -212,7 +210,7 @@ public class Lobby {
     }
 
     /** Removes a still-queued (not yet matched) connection - safe to call even if it was never queued. */
-    public synchronized void cancelQueued(WebSocket connection) {
+    public synchronized void cancelQueued(OutboundConnection connection) {
         matchmakingQueue.removeIf(w -> {
             if (w.connection != connection) return false;
             w.timeoutTask.cancel(false);
@@ -221,7 +219,7 @@ public class Lobby {
     }
 
     /** A connection dropped: forget it, and let its GameSession (if any) handle the forfeit/spectator-removal. */
-    public void handleDisconnect(WebSocket connection) {
+    public void handleDisconnect(OutboundConnection connection) {
         cancelQueued(connection);
         GameSession session = sessionByConnection.remove(connection);
         if (session != null) session.handleDisconnect(connection);
@@ -241,12 +239,12 @@ public class Lobby {
     }
 
     private static final class Waiting {
-        final WebSocket connection;
+        final OutboundConnection connection;
         final String username;
         final int rating;
         ScheduledFuture<?> timeoutTask;
 
-        Waiting(WebSocket connection, String username, int rating) {
+        Waiting(OutboundConnection connection, String username, int rating) {
             this.connection = connection;
             this.username = username;
             this.rating = rating;

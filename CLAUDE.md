@@ -357,13 +357,36 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     "waiting..." `JDialog` that closes itself once a `Seat` (or an error)
     arrives - blocking the caller until then, same pattern `LoginDialog`
     already established. Neither dialog is folded into the board UI itself.
-- **server/** - `KungFuChessServer` (a `WebSocketServer`) is a thin
-  transport/routing layer: its first message must be `attach <token>` (a
-  bearer token minted by `HttpApiServer`'s REST login/register - see below),
-  then it waits for exactly one lobby command (`play`/`join_room <code>` -
-  room *creation* is REST-only now) and delegates everything about *which*
-  game a connection ends up in to `Lobby`. `onClose` calls
-  `lobby.handleDisconnect(conn)`.
+- **server/** - `KungFuChessServer` (a `WebSocketServer`) is the WS
+  Gateway: its first message must be `attach <token>` (a bearer token
+  minted by `HttpApiServer`'s REST login/register - see below), then it
+  accepts `play`/`join_room <code>`/`click`/`jump`/`rematch` - room
+  *creation* is REST-only. Attach (token validation) is always handled
+  locally - `SessionTokenStore` is directly reachable regardless of
+  topology - but what happens with everything else depends on which
+  topology the constructor infers from `KFC_REDIS_URL`/`KFC_NATS_URL`
+  (same signal steps 3/4 already established):
+  - **Local/offline** (either unset): unchanged since before step 5 -
+    embeds `Lobby`/`GameSession` directly and calls them as plain Java
+    methods, wrapping each real `WebSocket` in a cached
+    `LocalOutboundConnection` (see `OutboundConnection` below).
+  - **Distributed** (both set - the Docker Compose deployment): becomes a
+    pure relay with **no** `Lobby`/`GameSession`/`UserRepository`
+    reference at all - see "REST API / scalable-server design" below and
+    `Server_Design.md`'s "Step 5" for the full picture of why and how.
+  - `OutboundConnection` (`void send(String)`/`boolean isOpen()`) is what
+    lets `Lobby`/`GameSession` stay completely unaware of which topology
+    they're running in - it replaced `org.java_websocket.WebSocket` as
+    their field/parameter type everywhere, with zero other logic change.
+    `LocalOutboundConnection` wraps a real `WebSocket` (local topology).
+    `RemoteOutboundConnection` wraps a `connectionId` and the Shard's NATS
+    connection - `send` publishes to `"conn.<connectionId>.out"`, which
+    the Gateway is already subscribed to per connection and relays
+    verbatim to the real socket; `isOpen` reflects the last disconnect
+    notification received for that `connectionId` (see `GameServerShard`
+    below), not a live query. `tests.FakeWebSocket` also implements this
+    interface directly (its `send`/`isOpen` already matched), which is why
+    `LobbyTest`/`GameSessionTest` needed no changes for this split.
   - `HttpApiServer` - the REST half of the protocol, built on the JDK's own
     `com.sun.net.httpserver` (no new web-framework dependency): `POST
     /api/login`/`POST /api/register` (form-encoded `username`/`password`,
@@ -384,12 +407,12 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     `LocalRoomCreator` wraps a direct `Lobby` reference, embedded case only;
     `RemoteRoomCreator` sends a real, blocking NATS request on subject
     `lobby.create_room` and waits for the room code back) abstracts over
-    that. The game-process side of that request is `RoomCreationResponder`
-    - started by `KungFuChessServer` instead of embedding `HttpApiServer`
-    whenever both env vars are set, subscribing on the same NATS connection
-    the process already opened for `Bus` (`NatsBus.rawConnection()`). See
-    "REST API / scalable-server design" below and `Server_Design.md`'s
-    "Step 4" for the full picture.
+    that. The other side of that request is `RoomCreationResponder`,
+    living in `GameServerShard` (the actual Game Server Shard process as of
+    step 5 - see below) alongside `Lobby` itself, subscribing on the same
+    NATS connection the process already opened for `Bus`
+    (`NatsBus.rawConnection()`). See "REST API / scalable-server design"
+    below and `Server_Design.md`'s "Step 4"/"Step 5" for the full picture.
     `SessionTokenStore` (an interface - `InMemorySessionTokenStore` for
     local/offline runs and every unit test, `RedisSessionTokenStore` when
     `KFC_REDIS_URL` is set, see "REST API / scalable-server design" below)
@@ -402,8 +425,9 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     ELO, routes connections to the right `GameSession`) - a room map
     (6-char generated code → `GameSession`, still always in-process - see
     "REST API / scalable-server design" below for why), a
-    `connection → GameSession` map (for `onClose` lookups, also inherently
-    in-process - a `WebSocket` can never be shared state), a
+    `connection → GameSession` map (for disconnect lookups, also inherently
+    in-process - a live connection identity, whichever `OutboundConnection`
+    implementation it is, can never be shared state), a
     `ReconnectRegistry` (`username → roomCode` - `InMemoryReconnectRegistry`
     or `RedisReconnectRegistry`, same selection as `SessionTokenStore` above)
     for reconnect, below, and a matchmaking queue. `createRoom(username)` (called
@@ -419,9 +443,28 @@ same `GameEngine` a local session uses; only what sits *around* it differs.
     forever - each `Waiting` entry owns its own scheduled timeout task,
     cancelled the moment it's matched or explicitly cancelled
     (`cancelQueued`).
-  - **Reconnect**: `Lobby.tryReconnect(connection, username)` is called by
-    `KungFuChessServer` right after every successful WS `attach`,
-    *before* waiting for a lobby command. If `username` was seated
+  - `GameServerShard` - the actual Game Server Shard process in the
+    distributed topology (own `main`; requires `KFC_REDIS_URL`/
+    `KFC_NATS_URL`, no local fallback, same stance as `ApiGateway`): owns
+    `UserRepository`, `Lobby`, and `RoomCreationResponder` (moved here from
+    `KungFuChessServer`). Never sees a real `WebSocket` - every command
+    arrives as a `GatewayCommandEnvelope` on subject `"gateway.command"`
+    (a plain record: `connectionId|username|rating|rawCommand`, decoded
+    fresh per message, not a client-facing `Protocol.java` concept),
+    resolved to a cached `RemoteOutboundConnection` per `connectionId` (the
+    *same* instance across multiple messages, so `Lobby`'s
+    connection-keyed maps keep working by reference) and dispatched with
+    the same routing logic `KungFuChessServer`'s local topology already
+    has. `"gateway.reconnect"` (`connectionId|username`) and
+    `"gateway.disconnect"` (bare `connectionId`) are the other two subjects
+    it subscribes to, mirroring `attach`'s reconnect side-effect and
+    `onClose`'s `lobby.handleDisconnect(...)` respectively.
+  - **Reconnect**: `Lobby.tryReconnect(connection, username)` runs right
+    after every successful WS `attach`, *before* waiting for a lobby
+    command - called directly by `KungFuChessServer` in the local topology,
+    or via a fire-and-forget `"gateway.reconnect"` publish (handled by
+    `GameServerShard`, above) in the distributed one; today's return value
+    is ignored by the caller either way. If `username` was seated
     (White/Black - never a spectator) in a session it was since
     disconnected from, `GameSession.reconnect(...)` restores that exact
     seat (cancelling the pending auto-abandon task via `cancelAbandonTask`)
@@ -586,27 +629,29 @@ Game Allocator, Game Server Shards, Observability; NATS/Redis, PostgreSQL,
 Docker/Kubernetes) asked for a step toward a scalable server, being built
 up in a small number of independently-committable steps - `Server_Design.md`
 is the full writeup, including the current roadmap and exactly what's
-deliberately not done yet at each stage (a real Game Allocator, multiple
-Game Server Shards, splitting the WS Gateway from the Game Server Shard,
-Kubernetes manifests - `Lobby.matchmakingQueue` specifically staying
-in-process a while longer too, see `Server_Design.md` for why). What *is*
-done so far: login/register/room-creation moved to a REST API
-(`HttpApiServer`), now genuinely running as its own process
-(`server.ApiGateway`) separate from the WebSocket Gateway
-(`KungFuChessServer`) in the Docker Compose deployment - see the
-`server/` bullet above for exactly how room creation crosses that process
-boundary (`RoomCreator`/NATS request-reply); `UserRepository` now speaks
-either SQLite (local dev/tests, zero external services) or PostgreSQL (the
-Docker Compose deployment); `SessionTokenStore`/`ReconnectRegistry` (see
-above) now speak either in-memory (same conditions) or Redis; `bus.Bus` now
-speaks either in-memory or NATS; `Dockerfile` + `docker-compose.yml` run
-the whole thing (Postgres, Redis, NATS, the WS Gateway/Game Server Shard,
-and the API Gateway, each its own container) as one command -
-`docker compose up --build` (see "Commands" above). The Swing client is
-never containerized - it's a desktop GUI, run locally against the
-container's exposed ports (the WS Gateway's 8887 and the API Gateway's
-8888 - it has no way to know, or need to know, that those two ports now
-belong to two different containers).
+deliberately not done yet (a real Game Allocator, multiple Game Server
+Shards, Kubernetes manifests, Observability beyond `ActivityLog` -
+`Lobby.matchmakingQueue` specifically staying in-process a while longer
+too, see `Server_Design.md` for why). What *is* done so far: the API
+Gateway (`HttpApiServer`, login/register/room-creation), the WS Gateway
+(`KungFuChessServer`), and the Game Server Shard (`GameServerShard`, which
+owns `Lobby`/every `GameSession`) are three genuinely separate processes in
+the Docker Compose deployment now, none holding a direct Java reference
+into either of the others - see the `server/` bullets above for exactly
+how each process boundary is crossed (`RoomCreator`/NATS request-reply for
+room creation; `OutboundConnection`/`GatewayCommandEnvelope`/fire-and-forget
+NATS publishes for the WS Gateway ↔ Game Server Shard boundary).
+`UserRepository` now speaks either SQLite (local dev/tests, zero external
+services) or PostgreSQL (the Docker Compose deployment);
+`SessionTokenStore`/`ReconnectRegistry` (see above) now speak either
+in-memory (same conditions) or Redis; `bus.Bus` now speaks either
+in-memory or NATS. `Dockerfile` + `docker-compose.yml` run the whole thing
+(Postgres, Redis, NATS, and the three server processes, each its own
+container) as one command - `docker compose up --build` (see "Commands"
+above). The Swing client is never containerized - it's a desktop GUI, run
+locally against the exposed ports (the WS Gateway's 8887 and the API
+Gateway's 8888 - it has no way to know, or need to know, how many
+containers those two ports actually span).
 
 This is phases 1-3 of a staged brief: pub/sub bus + WebSocket server + 2
 players; SQLite-backed accounts + ELO rating; ELO-ranged quick-match,

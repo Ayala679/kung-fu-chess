@@ -15,13 +15,19 @@ import org.java_websocket.enums.ReadyState;
 import org.java_websocket.framing.Framedata;
 import org.java_websocket.protocols.IProtocol;
 
+import server.OutboundConnection;
+
 /**
  * Minimal WebSocket test double: identity stands in for "a connection",
  * send(String) is recorded, everything else is either a safe no-op or
  * throws (nothing under test needs it). Used to unit-test server.Lobby's
- * pure matching/room logic without opening a real socket.
+ * pure matching/room logic without opening a real socket. Also implements
+ * server.OutboundConnection directly (its send(String)/isOpen() already
+ * match) so every existing test call site into Lobby/GameSession keeps
+ * compiling unchanged now that those take OutboundConnection instead of a
+ * real WebSocket - see Server_Design.md's "Step 5".
  */
-public class FakeWebSocket implements WebSocket {
+public class FakeWebSocket implements WebSocket, OutboundConnection {
     public final List<String> sentMessages = new ArrayList<>();
     private boolean open = true;
     private Object attachment;

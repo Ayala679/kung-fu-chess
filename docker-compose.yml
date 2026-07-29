@@ -1,12 +1,11 @@
 # Working containerized step for the Kung Fu Chess server - see
 # Server_Design.md for the roadmap and what's deliberately still not
 # covered (a real Game Allocator, multiple Game Server Shards, K8s).
-# `api-gateway` (login/register/room-creation) is now a genuinely separate
-# process/container from `server` (the WebSocket Gateway/Matchmaker/Game
-# Server Shard) - they only talk to each other over redis/nats, never a
-# direct Java call; see Server_Design.md's "Step 4". The Swing client is
-# never containerized - run it locally (see CLAUDE.md) against the ports
-# this exposes.
+# `api-gateway`, `ws-gateway`, and `game-server-shard` are three genuinely
+# separate processes/containers now, talking to each other only over
+# redis/nats, never a direct Java call - see Server_Design.md's "Step 4"
+# and "Step 5". The Swing client is never containerized - run it locally
+# (see CLAUDE.md) against the ports this exposes.
 #
 # Requires a .env file (git-ignored, never committed) with POSTGRES_PASSWORD
 # set - copy .env.example to .env and edit it before running
@@ -44,8 +43,32 @@ services:
       retries: 10
     command: ["-m", "8222"] # expose the monitoring endpoint the healthcheck above uses
 
-  server:
+  ws-gateway:
     build: .
+    # Distributed topology: KungFuChessServer detects KFC_REDIS_URL +
+    # KFC_NATS_URL both set and becomes a pure relay - no Lobby/Postgres
+    # access of its own, so KFC_DB_URL is deliberately not passed here (see
+    # Server_Design.md's "Step 5"; the entrypoint stays the Dockerfile's
+    # default server.KungFuChessServer, unlike api-gateway/game-server-shard
+    # below).
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      KFC_REDIS_URL: "redis://redis:6379"
+      KFC_NATS_URL: "nats://nats:4222"
+      KFC_WS_PORT: "8887"
+      KFC_LOG_PATH: "logs/ws-gateway.log"
+    ports:
+      - "8887:8887"
+    volumes:
+      - ./logs:/app/logs
+
+  game-server-shard:
+    build: .
+    entrypoint: ["java", "-cp", "out:lib/*", "server.GameServerShard"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,10 +80,10 @@ services:
       KFC_DB_URL: "jdbc:postgresql://postgres:5432/kungfuchess?user=kungfuchess&password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a .env file - see .env.example}"
       KFC_REDIS_URL: "redis://redis:6379"
       KFC_NATS_URL: "nats://nats:4222"
-      KFC_WS_PORT: "8887"
-      KFC_LOG_PATH: "logs/server.log"
-    ports:
-      - "8887:8887"
+      KFC_LOG_PATH: "logs/game-server-shard.log"
+    # No published ports - only reachable over NATS/Redis/Postgres, exactly
+    # like a real internal service (nothing outside this compose network
+    # ever talks to it directly).
     volumes:
       - ./logs:/app/logs
 

@@ -10,8 +10,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
-import org.java_websocket.WebSocket;
-
 import bus.Bus;
 import event.ClickSelector;
 import gameengine.GameEngine;
@@ -49,10 +47,12 @@ import snapshot.MoveNotation;
  * either (read-only, per the CTD brief).
  *
  * GameEngine/RealTimeArbiter are plain, non-thread-safe classes by design -
- * every other entry point drives them from a single thread. Java-WebSocket
- * dispatches connection callbacks on its own threads, concurrently with this
- * session's ticker/disconnect-timer thread, so every access to {@code
- * engine} (and to the two selection fields) is serialized through
+ * every other entry point drives them from a single thread. Incoming
+ * commands arrive on their own threads (Java-WebSocket's own connection
+ * callback threads in the local/offline topology, a NATS message-handler
+ * thread in the distributed one - see OutboundConnection), concurrently
+ * with this session's ticker/disconnect-timer thread, so every access to
+ * {@code engine} (and to the two selection fields) is serialized through
  * {@code lock}. {@code engine} itself is reassigned wholesale on a
  * successful rematch request (see {@link #requestRematch()}) rather than
  * reset in place, which is why it isn't {@code final}.
@@ -128,14 +128,14 @@ public class GameSession {
         return t;
     });
 
-    private final List<WebSocket> viewers = new CopyOnWriteArrayList<>();
+    private final List<OutboundConnection> viewers = new CopyOnWriteArrayList<>();
     private final List<PendingAction> pendingActions = new ArrayList<>();
 
     private Position whiteSelection;
     private Position blackSelection;
 
-    private WebSocket whiteConnection;
-    private WebSocket blackConnection;
+    private OutboundConnection whiteConnection;
+    private OutboundConnection blackConnection;
     private String whiteUsername;
     private String blackUsername;
     private int whiteRating;
@@ -188,7 +188,7 @@ public class GameSession {
      * game actually starts; a VIEWER joining an already-running game is
      * greeted immediately.
      */
-    public synchronized Seat join(WebSocket connection, String username, int rating) {
+    public synchronized Seat join(OutboundConnection connection, String username, int rating) {
         if (whiteConnection == null) {
             whiteConnection = connection;
             whiteUsername = username;
@@ -214,13 +214,13 @@ public class GameSession {
     }
 
     // Sends WELCOME + one initial snapshot to a newly-seated connection. Calls buildSnapshotFor/buildNeutralSnapshot.
-    private void greet(WebSocket connection, Seat seat) {
+    private void greet(OutboundConnection connection, Seat seat) {
         send(connection, Protocol.WELCOME + "|role=" + seat);
         GameSnapshot snapshot = seat.isPlayer() ? buildSnapshotFor(seat.toColor()) : buildNeutralSnapshot();
         send(connection, encode(snapshot));
     }
 
-    public Seat seatOf(WebSocket connection) {
+    public Seat seatOf(OutboundConnection connection) {
         if (connection == whiteConnection) return Seat.WHITE;
         if (connection == blackConnection) return Seat.BLACK;
         if (viewers.contains(connection)) return Seat.VIEWER;
@@ -272,7 +272,7 @@ public class GameSession {
      * connection (seat == null) gets neither, since that should never
      * happen given how KungFuChessServer routes messages.
      */
-    public void handleCommand(WebSocket connection, String command) {
+    public void handleCommand(OutboundConnection connection, String command) {
         // No per-call entry/exit log here on purpose - a fast real-time game
         // can generate a click/jump every few hundred milliseconds, and that
         // volume of log lines would drown out the actually-significant
@@ -288,7 +288,7 @@ public class GameSession {
         }
     }
 
-    private void doHandleCommand(WebSocket connection, String command) {
+    private void doHandleCommand(OutboundConnection connection, String command) {
         String[] parts = command.trim().split("\\s+");
 
         if (parts.length >= 1 && parts[0].equals(Protocol.REMATCH)) {
@@ -356,7 +356,7 @@ public class GameSession {
      * while the game isn't actually over yet, or while the other seat is
      * currently vacated by a disconnect (nobody to fairly restart against).
      */
-    private void handleRematchCommand(WebSocket connection) {
+    private void handleRematchCommand(OutboundConnection connection) {
         Seat seat = seatOf(connection);
         if (seat == null) return;
         if (!seat.isPlayer()) {
@@ -501,7 +501,7 @@ public class GameSession {
     private void broadcastAll(String message) {
         send(whiteConnection, message);
         send(blackConnection, message);
-        for (WebSocket viewer : viewers) send(viewer, message);
+        for (OutboundConnection viewer : viewers) send(viewer, message);
     }
 
     private boolean ownsPieceAt(Piece.Color color, int row, int col) {
@@ -528,7 +528,7 @@ public class GameSession {
      * removed from the broadcast list (no reconnection concept for
      * spectators - rejoining the room via a fresh join_room is enough).
      */
-    public void handleDisconnect(WebSocket connection) {
+    public void handleDisconnect(OutboundConnection connection) {
         if (connection == whiteConnection) {
             whiteConnection = null;
             whiteAbandonTask = scheduleAutoAbandon(Piece.Color.WHITE);
@@ -545,16 +545,16 @@ public class GameSession {
     /** Tells the still-connected side (and any viewers) that {@code disconnectedColor} just dropped, and how long they have before the game is auto-abandoned. */
     private void notifyOpponentOfDisconnect(Piece.Color disconnectedColor) {
         String message = Protocol.OPPONENT_DISCONNECTED + "|" + (disconnectGraceMillis / 1000);
-        WebSocket other = disconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        OutboundConnection other = disconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
         send(other, message);
-        for (WebSocket viewer : viewers) send(viewer, message);
+        for (OutboundConnection viewer : viewers) send(viewer, message);
     }
 
     /** Tells the still-connected side (and any viewers) that {@code reconnectedColor} is back. */
     private void notifyOpponentOfReconnect(Piece.Color reconnectedColor) {
-        WebSocket other = reconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        OutboundConnection other = reconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
         send(other, Protocol.OPPONENT_RECONNECTED);
-        for (WebSocket viewer : viewers) send(viewer, Protocol.OPPONENT_RECONNECTED);
+        for (OutboundConnection viewer : viewers) send(viewer, Protocol.OPPONENT_RECONNECTED);
     }
 
     /**
@@ -572,7 +572,7 @@ public class GameSession {
      * being stuck GAME_PAUSED forever; see
      * testEitherSeatedPlayerCanRequestARematchOnceTheGameIsOver.
      */
-    public synchronized boolean reconnect(WebSocket connection, String username) {
+    public synchronized boolean reconnect(OutboundConnection connection, String username) {
         if (username.equals(whiteUsername) && whiteConnection == null) {
             whiteConnection = connection;
             cancelAbandonTask(Piece.Color.WHITE);
@@ -631,7 +631,7 @@ public class GameSession {
 
         if (!viewers.isEmpty()) {
             String neutralMessage = encode(buildNeutralSnapshot());
-            for (WebSocket viewer : viewers) send(viewer, neutralMessage);
+            for (OutboundConnection viewer : viewers) send(viewer, neutralMessage);
         }
 
         // Published as the already-encoded wire string, not the raw GameSnapshot
@@ -685,7 +685,7 @@ public class GameSession {
                 + ") beat " + loserName + " (" + loserRating + " -> " + outcome.newLoserRating + ")");
     }
 
-    private void send(WebSocket connection, String message) {
+    private void send(OutboundConnection connection, String message) {
         if (connection != null && connection.isOpen()) {
             connection.send(message);
         }
