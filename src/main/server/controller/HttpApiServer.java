@@ -1,4 +1,4 @@
-package server;
+package server.controller;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -15,8 +15,11 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 import logging.ActivityLog;
-import server.auth.AuthController;
+import server.Protocol;
+import server.auth.AuthService;
 import server.auth.SessionTokenStore;
+import server.room.RoomCreationException;
+import server.room.RoomCreator;
 
 /**
  * The REST half of the wire protocol - everything that isn't realtime
@@ -25,7 +28,7 @@ import server.auth.SessionTokenStore;
  * rather than adding a web-framework dependency, matching this project's
  * existing "avoid new dependencies for a small text protocol" choices
  * (SnapshotCodec, ActivityLog). Runs embedded in the same process/JVM as
- * KungFuChessServer for local/offline runs, or standalone as its own
+ * KungFuChessServerService for local/offline runs, or standalone as its own
  * process (server.ApiGateway) in the Docker Compose deployment - see
  * Server_Design.md's "Step 4" and server.RoomCreator for how room creation
  * is made to work either way.
@@ -33,12 +36,12 @@ import server.auth.SessionTokenStore;
 public class HttpApiServer {
     private final HttpServer httpServer;
 
-    public HttpApiServer(int port, AuthController authController, SessionTokenStore sessionTokenStore,
+    public HttpApiServer(int port, AuthService authService, SessionTokenStore sessionTokenStore,
                           RoomCreator roomCreator, ActivityLog activityLog) throws IOException {
         this.httpServer = HttpServer.create(new InetSocketAddress(port), 0);
         httpServer.setExecutor(Executors.newCachedThreadPool());
-        httpServer.createContext("/api/login", authHandler(Protocol.LOGIN, authController, sessionTokenStore, activityLog));
-        httpServer.createContext("/api/register", authHandler(Protocol.REGISTER, authController, sessionTokenStore, activityLog));
+        httpServer.createContext("/api/login", authHandler(Protocol.LOGIN, authService, sessionTokenStore, activityLog));
+        httpServer.createContext("/api/register", authHandler(Protocol.REGISTER, authService, sessionTokenStore, activityLog));
         httpServer.createContext("/api/rooms", roomsHandler(sessionTokenStore, roomCreator, activityLog));
     }
 
@@ -54,7 +57,7 @@ public class HttpApiServer {
         return httpServer.getAddress().getPort();
     }
 
-    private static HttpHandler authHandler(String mode, AuthController authController,
+    private static HttpHandler authHandler(String mode, AuthService authService,
                                             SessionTokenStore sessionTokenStore, ActivityLog activityLog) {
         return exchange -> {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -65,7 +68,7 @@ public class HttpApiServer {
             String username = form.getOrDefault("username", "");
             String password = form.getOrDefault("password", "");
 
-            AuthController.Outcome outcome = authController.handleAuth(mode + " " + username + " " + password);
+            AuthService.Outcome outcome = authService.handleAuth(mode + " " + username + " " + password);
             if (outcome.isMalformed()) {
                 respond(exchange, 400, Protocol.ERROR + "|expected username and password");
                 return;

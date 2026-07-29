@@ -20,24 +20,30 @@ kept fully working end to end before moving on:
 3. ✅ **Redis (shared state) + NATS (internal bus)** - still one process;
    laid the groundwork step 4 actually needed.
 4. ✅ **API Gateway split** into its own process.
-5. ✅ **WebSocket Gateway split** from the Game Server Shard - this step.
-6. ⬜ **Game Allocator + multiple Game Server Shards.**
-7. ⬜ **Observability + Kubernetes/K3s manifests.**
+5. ✅ **WebSocket Gateway split** from the Game Server Shard, refined so
+   the Matchmaker is also its own process (not just logic bundled inside
+   the Shard) - see "Step 5 refinement" below.
+6a. ✅ **Game Allocator + multiple Game Server Shards** - see "Step 6a"
+    below.
+6b. ⬜ **Observability.**
+6c. ⬜ **Kubernetes/K3s manifests.**
+6d. ✅ **Main/Controller/Service split** across all five server processes -
+    see "Step 6d" below.
 
 ## Component mapping
 
 | Reference design | This project, today |
 |---|---|
-| API Gateway (REST: login, rooms, history) | `server.HttpApiServer` - `POST /api/login`, `POST /api/register`, `POST /api/rooms`. Runs as its own process, `server.ApiGateway`, in the Docker Compose deployment (see "Step 4" below) - separate from the WS Gateway/Game Server Shard, talking to it only over NATS request-reply. Still embeds in the same process for local/offline runs (no Redis/NATS configured). |
-| WS Gateway (live connections, state updates) | `server.KungFuChessServer`, now a genuinely separate process/container (`ws-gateway`) from the Game Server Shard in the Docker Compose deployment - see "Step 5" below. First message is still `attach <token>`; once attached, every command (`play`/`join_room <code>`/`click`/`jump`/`rematch`) is relayed to the Shard over NATS rather than handled in-process. Still embeds `Lobby`/`GameSession` directly for local/offline runs (no Redis/NATS configured), unchanged. |
-| Matchmaker | `server.Lobby.play(...)` - ELO-ranged (±100) matchmaking queue. Lives inside the Game Server Shard now (`server.GameServerShard`), reached by the WS Gateway only through the NATS relay described in "Step 5". |
-| Game Allocator (decides which shard runs a room) | **Not implemented.** There's only ever one Game Server Shard (see below), so there's nothing to allocate between yet. |
-| Game Server Shards (authoritative GameEngine, many instances) | `server.GameSession` + `gameengine.GameEngine` - exactly the same engine the offline client uses. Now its own process, `server.GameServerShard` (see "Step 5"), separate from the WS/API Gateways. Always exactly **one** shard - see step 6. |
+| API Gateway (REST: login, rooms, history) | `server.HttpApiServer` - `POST /api/login`, `POST /api/register`, `POST /api/rooms`. Runs as its own process, entry point `server.ApiGatewayMain` (own `main`, wires `server.ApiGateway`), in the Docker Compose deployment (see "Step 4" below) - separate from the WS Gateway/Game Server Shard, talking to it only over NATS request-reply. Still embeds in the same process for local/offline runs (no Redis/NATS configured). |
+| WS Gateway (live connections, state updates) | `server.KungFuChessServerController`/`KungFuChessServerService` (entry point `server.KungFuChessServerMain`), now a genuinely separate process/container (`ws-gateway`) from a Game Server Shard in the Docker Compose deployment - see "Step 5" below. First message is still `attach <token>`; once attached, every command (`play`/`join_room <code>`/`click`/`jump`/`rematch`) is relayed to the right Shard over NATS rather than handled in-process. Still embeds `Lobby`/`GameSession` directly for local/offline runs (no Redis/NATS configured), unchanged. |
+| Matchmaker | `server.MatchmakerController`/`MatchmakerService` (entry point `server.MatchmakerMain`) - its own process (needs only `KFC_NATS_URL`), owning `server.MatchQueue` (the ELO-ranged, ±100, quick-match pairing queue). Reached by a Game Server Shard forwarding "play" commands over NATS (`"matchmaker.play"`); on a match, asks the Game Allocator for a shard and publishes to that shard's own `"shard.<id>.seat_pair"` for it to seat via `Lobby.seatMatchedPair`. See "Step 5 refinement"/"Step 6a"/"Step 6d" below. |
+| Game Allocator (decides which shard runs a room) | `server.GameAllocatorController`/`GameAllocatorService` (entry point `server.GameAllocatorMain`) - its own process (needs only `KFC_NATS_URL` + `KFC_SHARD_IDS`), owning `server.ShardPicker` (static round-robin over the configured shard list). Answers `"allocator.assign"` NATS requests with the next shard id. See "Step 6a" below. |
+| Game Server Shards (authoritative GameEngine, many instances) | `server.GameSession` + `gameengine.GameEngine` - exactly the same engine the offline client uses, inside `server.GameServerShardController`/`GameServerShardService` (entry point `server.GameServerShardMain`). **Two** instances now run in the Docker Compose deployment (`game-server-shard-1`/`-2`, each its own `KFC_SHARD_ID`), each with its own `Lobby`/rooms - see "Step 6a" below for how the WS Gateway/Matchmaker/API Gateway route to the right one. |
 | Observability (logs, metrics, health checks, load tests) | `logging.ActivityLog` only (append-only text log, server-side + one per client). No metrics, no health-check endpoint, no load tests. |
 | NATS / Redis (internal pub-sub between services) | `bus.Bus` - an interface now. `InMemoryBus` (local/offline runs, every unit test) or `NatsBus` (a real NATS connection, `KFC_NATS_URL` set - the Docker Compose deployment). Genuinely in active cross-process use as of step 5 - see below - not just a ready-but-unused abstraction any more. |
-| Redis (sessions, active rooms, reconnect, matchmaking queue) | **Partly done** - see "Step 3" below for exactly what moved to Redis and what's deliberately still in-process (`Lobby.rooms`/`sessionByConnection`/`matchmakingQueue`). |
+| Redis (sessions, active rooms, reconnect, matchmaking queue, room→shard routing) | **Partly done** - see "Step 3" below for exactly what moved to Redis and what's deliberately still in-process (`Lobby.rooms`/`sessionByConnection`, and `MatchQueue`'s own queue - inside the standalone `Matchmaker` process, still an in-memory queue, not Redis-backed). `RoomDirectory` (`roomCode → shardId`, "Step 6a") is the newest Redis-backed store, in the same dual-mode shape as `ReconnectRegistry`. |
 | PostgreSQL (users, games, results, move history) | `server.auth.UserRepository` now speaks PostgreSQL when deployed via Docker Compose (see below) - `users` table only (accounts + rating). No `games`/`results`/move-history tables exist yet - move history lives only in each `GameSession`'s in-memory log, never persisted. |
-| Docker Compose (small runnable version) | `Dockerfile` + `docker-compose.yml` at the repo root - `docker compose up --build` runs 6 containers: `postgres`, `redis`, `nats`, `ws-gateway`, `game-server-shard`, `api-gateway`. |
+| Docker Compose (small runnable version) | `Dockerfile` + `docker-compose.yml` at the repo root - `docker compose up --build` runs 9 containers: `postgres`, `redis`, `nats`, `ws-gateway`, `game-server-shard-1`, `game-server-shard-2`, `game-allocator`, `matchmaker`, `api-gateway`. |
 | Kubernetes / K3s | Not started. |
 
 ## Step 3: Redis (shared state) + NATS (internal bus)
@@ -66,11 +72,13 @@ with:
   stage anyway), `Lobby.sessionByConnection` (`OutboundConnection →
   GameSession` - inherently local to whichever process holds the real
   connection identity, this will *never* move to Redis in any future step
-  either), and `Lobby.matchmakingQueue` (today it stores a connection
-  reference alongside username/rating; moving just the data half to Redis
-  now would add complexity with zero payoff until step 6 actually gives a
-  second Game Server Shard process something to read it from - revisit
-  then).
+  either), and the matchmaking queue (at this stage still `Lobby.play`'s
+  own field; moved into `MatchQueue`'s own process in the step 5
+  refinement below, but still in-memory there too - it stores a connection
+  reference alongside username/rating, and moving just the data half to
+  Redis now would add complexity with zero payoff until step 6 actually
+  gives a second Game Server Shard process something to read it from -
+  revisit then).
 
 `bus.Bus` became an interface the same way `SessionTokenStore` did.
 `InMemoryBus` is today's exact old behavior, renamed; `NatsBus` wraps a
@@ -210,6 +218,158 @@ above; either unset → unchanged local/offline embedding.
 port, only reachable over NATS/Redis/Postgres, exactly like a real
 internal service.
 
+### Step 5 refinement: the Matchmaker becomes its own process too
+
+The first pass above left quick-match pairing (`Lobby.play`) bundled
+inside the Game Server Shard - functionally fine, but not what the
+reference diagram means by "Matchmaker": a component that "pairs players
+for quick-match" specifically, distinct from the Shard that actually runs
+games. Room creation/joining correctly stays Shard-adjacent (there's no
+Game Allocator yet to decide *which* shard a room belongs on - see the
+roadmap), so only the ELO-ranged pairing algorithm itself needed to move.
+
+**The extraction**: the queue/timeout/pairing logic (`Lobby.play`,
+`cancelQueued`, the timeout scheduler, the `Waiting` entry) moved
+verbatim into a new, topology-agnostic `server.MatchQueue` (same
+`OutboundConnection`-based design as `Lobby`/`GameSession`, so it's
+directly unit-tested in isolation - see `tests.MatchmakerTest`). Instead
+of building a `GameSession` itself on a match, it calls a
+`MatchFoundListener` callback; `Lobby` gained one new method,
+`seatMatchedPair(...)`, which is exactly what `play()`'s old "matched"
+branch used to do inline, now reachable by anyone.
+
+**The Gateway needed zero changes.** It already fire-and-forget publishes
+every post-attach command to `"gateway.command"` unchanged. The only
+routing change is inside `GameServerShard`: its `"play"` branch, instead
+of calling a (now-removed) `Lobby.play`, just republishes the exact
+envelope it already has onward to `"matchmaker.play"` - the same
+"this isn't mine to handle, forward it" pattern `HttpApiServer` already
+uses for room creation via `RoomCreator`. The stuck-in-a-finished-session
+check (`isGameOver`/`leaveFinishedSessionIfAny`) still runs first,
+unaffected - so that earlier bug fix isn't at risk of regressing.
+
+The new `server.Matchmaker` process (own `main`, needs only
+`KFC_NATS_URL` - no Postgres/Redis at all, since `MatchQueue` is pure
+in-memory) owns one `MatchQueue`, wired to publish a `SeatPairEnvelope`
+(`connectionIdA|userA|ratingA|connectionIdB|userB|ratingB`) to
+`"shard.seat_pair"` on a match - `GameServerShard` subscribes and calls
+`Lobby.seatMatchedPair`. It also subscribes, independently, to the very
+same `"gateway.disconnect"` subject `GameServerShard` already listens on
+(plain NATS pub/sub naturally supports more than one subscriber per
+subject), so it can drop a disconnected player from its own queue without
+the Gateway ever needing to know two different services now care about
+disconnects.
+
+The embedded/local topology gets its own in-process `MatchQueue` too
+(constructed by `KungFuChessServer` alongside its local `Lobby`, listener
+wired straight to `lobby::seatMatchedPair` - no NATS involved), so
+behavior there is unchanged. `docker-compose.yml` gained a `matchmaker`
+service - `depends_on: nats` only, no published port, no
+Postgres/Redis env vars at all.
+
+## Step 6a: Game Allocator + multiple Game Server Shards
+
+Per the original brief, two components were still essentially missing:
+**Game Allocator** and **multiple Game Server Shards** (there was only
+ever one shard, so nothing to allocate between). This step implements
+both together, since a Game Allocator is meaningless without a second
+shard to allocate to.
+
+**The real problem this step solves is routing, not just running a second
+container.** With multiple shards, each owning a disjoint set of rooms in
+its own local `Lobby`, the WS Gateway must route every post-attach command
+to the *one* shard that actually owns that connection's game - the wrong
+shard (or a broadcast to all of them) either drops the command silently
+or, worse, causes several shards to reply to the same client at once.
+
+**Allocation policy: static round-robin**, deliberately simpler than a
+load-aware policy (which would need shards to report their own game
+counts somewhere - real, but out of scope for this step; a natural future
+extension once Observability exists). `server.ShardPicker` is a pure,
+directly-unit-tested `AtomicInteger` round-robin over a fixed shard list
+(`tests.ShardPickerTest`) - the same "pure logic class + thin NATS-process
+wrapper" split already used for `MatchQueue`/`Matchmaker`. `server.GameAllocator`
+wraps it behind one NATS request-reply subject, `"allocator.assign"`
+(empty request, shardId reply), mirroring `RoomCreationResponder`'s own
+shape exactly. Needs only `KFC_NATS_URL` + `KFC_SHARD_IDS` (comma-separated) -
+no Postgres/Redis at all, since round-robin over a static list needs no
+persistent state.
+
+**Every `GameServerShard` gets its own identity, `KFC_SHARD_ID`**, and:
+- Subscribes to `"shard.<id>.command"` instead of the old global
+  `"gateway.command"`.
+- Subscribes to `"shard.<id>.create_room"` instead of one fixed
+  `RoomCreationResponder` subject.
+- Subscribes to `"shard.<id>.seat_pair"` instead of one fixed
+  `"shard.seat_pair"`.
+- Still subscribes to the *shared* `"gateway.reconnect"`/
+  `"gateway.disconnect"` subjects, unchanged - broadcasting these to every
+  shard turns out to already be safe: a non-owning shard's
+  `Lobby.tryReconnect`/`handleDisconnect` simply finds nothing local and
+  no-ops, since `ReconnectRegistry` is Redis-shared but `Lobby.rooms` is
+  not, so only the true owner ever matches. (Regular gameplay commands
+  can't use this same "broadcast + silent no-op" trick - a non-owning
+  shard's fallback for an unrecognized click/jump is to reply with an
+  `ERROR`, which would reach the client from every non-owning shard at
+  once. That's why those specifically need precise per-shard routing,
+  below, while reconnect/disconnect don't.)
+- After a connectionId is newly claimed - `joinRoom`/`seatMatchedPair`/
+  `tryReconnect` all succeeding - publishes a tiny NATS notification,
+  `"conn.<connectionId>.shard"` = its own shardId, so the Gateway learns
+  (or updates) which shard now owns that connection.
+
+**`Lobby` gained an optional `shardId` + `RoomDirectory`** (`roomCode →
+shardId`, same `InMemoryRoomDirectory`/`RedisRoomDirectory` dual-mode
+shape as `ReconnectRegistry`), threaded through a new fullest constructor
+overload - the existing shorter constructors delegate to it with
+`shardId=null`/`new InMemoryRoomDirectory()`, so **every existing
+`new Lobby(...)` call site (4 of them, including every test) needed zero
+changes**. `createRoom`/`seatMatchedPair` call
+`roomDirectory.record(code, shardId)` right after minting a code.
+
+**WS Gateway routing** (`KungFuChessServer.routeDistributedCommand`):
+- `"play"` → unchanged, still `"matchmaker.play"` (Matchmaker asks the
+  Allocator itself once matched - the Gateway needs no shard knowledge for
+  this path at all).
+- `"join_room <code>"` → resolved **fresh, every time**, via
+  `RoomDirectory.shardFor(code)` - deliberately never the cached shard
+  below, because a stale entry from a previous, now-finished game on this
+  same connection must never leak into routing a request for a brand-new
+  room. An unknown code gets a clean `ERROR|unknown room code` straight
+  from the Gateway - no shard round trip needed at all.
+- Every other command (click/jump/rematch) relies entirely on a local
+  `Map<WebSocket, String> shardOf` cache, populated by subscribing to
+  `"conn.<connectionId>.shard"` (added alongside the pre-existing
+  `"conn.<connectionId>.out"` subscription, same lifecycle - see `onOpen`/
+  `onClose`).
+
+**REST room creation** (`RemoteRoomCreator`): first asks the Allocator for
+a shardId, then sends the room-creation request to that shard's specific
+`"shard.<id>.create_room"` subject instead of one fixed subject.
+`RoomCreationResponder`'s constructor now takes its owning shard's id.
+
+**`GameSession`/`GameEngine` needed zero changes** - each session already
+fully self-ticks via its own `ScheduledExecutorService`, entirely
+self-contained once a shard owns it. Sharding is purely a routing concern
+resolved before a command ever reaches a session.
+
+`docker-compose.yml`: `game-server-shard` (one service) became two
+explicit services, `game-server-shard-1`/`game-server-shard-2`, each its
+own `KFC_SHARD_ID` - plain Compose has no per-replica env var templating
+(that needs Swarm), so two named services was simpler than fighting
+`--scale` for this. A new `game-allocator` service needs only
+`KFC_NATS_URL` + `KFC_SHARD_IDS` - no Postgres/Redis, no published port.
+
+**Verified live**: round-robin allocation confirmed by grepping each
+shard's own log for room-creation entries (alternates shard-1/shard-2/
+shard-1/... across both REST-created and quick-matched rooms); full
+gameplay (click + jump) through rooms landing on either shard, proving
+`shardOf`-cache routing correctly keeps directing follow-up commands to
+whichever shard actually owns the session; `join_room` with a bogus code
+returns a clean `ERROR` with no shard round trip; disconnect/reconnect
+verified across shards (exercises the still-shared `gateway.reconnect`
+broadcast path); local/offline mode (no Docker) confirmed unaffected.
+
 ## What changed in step 2 (REST + PostgreSQL)
 
 1. **Login/register/room-creation moved off the WebSocket, onto REST.**
@@ -268,29 +428,99 @@ internal service.
    it runs locally against the container's exposed ports (8887 WS, 8888
    HTTP).
 
-## All three Gateway/Matchmaker/Shard roles are now separate processes
+## Step 6d: Main/Controller/Service split across every server process
 
-`api-gateway`, `ws-gateway`, and `game-server-shard` are three genuinely
-independent containers as of step 5, talking to each other only over
-NATS/Redis/Postgres - none of them hold a direct Java reference into
-either of the others. What's still a deliberate scope decision, not the
-end state: there's only ever **one** Game Server Shard process, so there's
-nothing yet for a Game Allocator to allocate between - that's step 6.
+Before this step, each of the five server processes (`KungFuChessServer`,
+`GameServerShard`, `Matchmaker`, `GameAllocator`, `ApiGateway`) mixed three
+concerns into one class: the JVM entry point (`main`, reading env vars),
+the endpoint layer (NATS subscriptions / WebSocket callbacks / HTTP
+routes), and the actual decision logic. This didn't match the pattern the
+local/offline game already used - `Main.java` is a tiny entry point that
+immediately hands off to `controller.BoardController`, which owns all the
+real logic.
+
+**The split, applied uniformly**: `XxxMain` (own `main`, reads env/args,
+wires the other two, starts - no logic of its own), `XxxController` (the
+endpoints only - decodes each request to its raw fields, delegates
+everything else), `XxxService` (all the decision logic, talking to the
+deeper layers - `Lobby`, `MatchQueue`, `ShardPicker` - that this step never
+touched). Concretely: `KungFuChessServerMain`/`Controller`/`Service`,
+`GameServerShardMain`/`Controller`/`Service` (also absorbed the old
+standalone `RoomCreationResponder` class as a `GameServerShardService`
+method, `createRoom(username)`, for full consistency),
+`MatchmakerMain`/`Controller`/`Service`, and
+`GameAllocatorMain`/`Controller`/`Service`. Note this had already happened
+in spirit for the pure-logic classes underneath two of these -
+`MatchQueue`/`ShardPicker` were always the "service" behind
+`Matchmaker`/`GameAllocator` - this step made the naming and the split
+explicit and uniform across the whole `server/` package, not just those
+two.
+
+`ApiGateway` is the one process that doesn't get a full three-way split:
+`HttpApiServer` already *was* its Controller (HTTP route handlers, no
+business logic), and `server.auth.AuthController` already *was* a Service
+in every way but name - it never touched HTTP or WebSocket at all, just
+orchestrated `AuthCommandParser` + `UserRepository` - so it was renamed to
+`server.auth.AuthService` rather than restructured. `ApiGateway` itself
+keeps its existing role, constructing `HttpApiServer` and its dependencies -
+the same "wiring" role `XxxService` plays in the other four processes, just
+under its original name since nothing about its actual code changed.
+
+**Follow-up**: once split, the flat `server/` package (~36 files) felt
+cluttered - a second pass reorganized every `XxxMain`/`XxxController`/
+`XxxService` into matching folders/packages, `server/main/`
+(`server.main`), `server/controller/` (`server.controller` - also gained
+`HttpApiServer`, since it already played that role), and `server/service/`
+(`server.service` - also gained `ApiGateway`, for the same reason) -
+purely a physical reorganization, no behavior change. `server/auth/` was
+untouched (a separate, pre-existing subpackage this reorganization doesn't
+overlap with).
+
+**A third pass** split the ~23 classes that stayed in the `server`
+package root even further, along the lines of the dual-mode families
+already established (interface + `InMemoryXxx` + `RedisXxx`) that were
+already sitting right next to each other: `server/connection/`
+(`OutboundConnection`, `LocalOutboundConnection`, `RemoteOutboundConnection`),
+`server/room/` (`RoomCreator`, `LocalRoomCreator`, `RemoteRoomCreator`,
+`RoomCreationException`, `RoomDirectory`, `InMemoryRoomDirectory`,
+`RedisRoomDirectory`), and `server/reconnect/` (`ReconnectRegistry`,
+`InMemoryReconnectRegistry`, `RedisReconnectRegistry`). What's left
+directly in `server/` (`Lobby`, `GameSession`, `Protocol`, `Seat`,
+`SnapshotCodec`, `GatewayCommandEnvelope`, `SeatPairEnvelope`,
+`MatchQueue`, `ShardPicker`, `GameAllocatorClient`) doesn't share this kind
+of tight family resemblance with anything else, so it stayed put rather
+than being forced into an artificial grouping.
+
+**Verified**: full test suite unaffected (315 tests, same count before and
+after - none of the five split process classes were ever constructed
+directly by a test, only from their own `main`, confirmed by grep before
+starting); `docker-compose.yml`/`Dockerfile` entrypoints updated to the new
+`*Main` classes; full Docker Compose smoke test (REST room creation +
+gameplay, quick-match + disconnect/reconnect, unknown room code) and the
+untouched local/offline path (`server.KungFuChessServerMain`, no Docker)
+both re-verified end to end, matching every prior step's verification
+rigor.
+
+## All six Gateway/Matchmaker/Allocator/Shard roles are now separate processes
+
+`api-gateway`, `ws-gateway`, `matchmaker`, `game-allocator`, and two
+`game-server-shard-*` instances are six genuinely independent process
+types (nine containers total with `postgres`/`redis`/`nats`) as of step 6a,
+talking to each other only over NATS/Redis/Postgres - none of them hold a
+direct Java reference into any of the others.
 
 ## Not done yet (future work)
 
-- **Game Allocator + multiple Game Server Shards** (step 6) - the biggest
-  remaining step. Needs a component deciding which of several shard
-  processes a new room goes to, and `ws-gateway` needing to know which
-  shard owns a given room's `connectionId` (today it just publishes to one
-  fixed `"gateway.command"` subject, since there's only one shard
-  listening).
-- **`Lobby.matchmakingQueue` moving to Redis** - deliberately deferred to
-  step 6 alongside the Game Allocator, since it only gains real value once
-  there's more than one process that needs to see the same queue (see
-  "Step 3" above).
+- **`MatchQueue`'s queue moving to Redis** - deliberately still deferred
+  (see "Step 3" above): even with multiple Game Server Shards now (step
+  6a), there's still only ever one `Matchmaker` process, so nothing yet
+  needs to see the same queue from two places.
 - **`games`/`results`/move-history tables** in PostgreSQL - move history
   currently lives only in each `GameSession`'s in-memory log.
-- **Observability**: metrics, a health-check endpoint, load tests (step 7).
-  Only `ActivityLog`'s append-only text log exists today.
-- **Kubernetes/K3s manifests** (step 7) - only Docker Compose exists.
+- **Load-aware shard allocation** - `GameAllocator` uses static
+  round-robin (step 6a), deliberately simpler than querying each shard's
+  current game count; a natural extension once Observability (below)
+  gives it something to query.
+- **Observability**: metrics, a health-check endpoint, load tests (step
+  6b). Only `ActivityLog`'s append-only text log exists today.
+- **Kubernetes/K3s manifests** (step 6c) - only Docker Compose exists.

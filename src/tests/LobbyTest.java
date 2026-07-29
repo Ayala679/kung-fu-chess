@@ -9,10 +9,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import bus.InMemoryBus;
 import logging.ActivityLog;
 import server.GameSession;
-import server.InMemoryReconnectRegistry;
 import server.Lobby;
 import server.Seat;
 import server.auth.UserRepository;
+import server.reconnect.InMemoryReconnectRegistry;
 
 class LobbyTest {
 
@@ -22,69 +22,24 @@ class LobbyTest {
         return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry());
     }
 
-    private static Lobby newLobbyWithShortMatchmakingTimeout(Path tempDir, long timeoutSeconds) {
-        UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
-        ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
-        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(), timeoutSeconds);
-    }
-
     private static Lobby newLobbyWithShortDisconnectGrace(Path tempDir, long disconnectGraceMillis) {
         UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
         ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
-        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(), 60_000L, disconnectGraceMillis);
+        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(), disconnectGraceMillis);
     }
 
-    @Test void testPlayQueuesWhenNoOneIsWaiting(@TempDir Path tempDir) {
-        Lobby lobby = newLobby(tempDir);
-        FakeWebSocket alice = new FakeWebSocket();
-
-        boolean matched = lobby.play(alice, "alice", 1200);
-
-        assertFalse(matched);
-        assertTrue(alice.sentMessages.isEmpty()); // caller (KungFuChessServer) sends WAITING, not Lobby itself
-    }
-
-    @Test void testPlayMatchesTwoPlayersWithinEloRange(@TempDir Path tempDir) {
+    @Test void testSeatMatchedPairSeatsAndGreetsBothSides(@TempDir Path tempDir) {
         Lobby lobby = newLobby(tempDir);
         FakeWebSocket alice = new FakeWebSocket();
         FakeWebSocket bob = new FakeWebSocket();
 
-        assertFalse(lobby.play(alice, "alice", 1200));
-        boolean matched = lobby.play(bob, "bob", 1250); // within +-100
+        lobby.seatMatchedPair(alice, "alice", 1200, bob, "bob", 1250);
 
-        assertTrue(matched);
         assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
         assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
         assertTrue(bob.sentMessages.stream().anyMatch(m -> m.startsWith("STATE")));
-    }
-
-    @Test void testPlayDoesNotMatchPlayersOutsideEloRange(@TempDir Path tempDir) {
-        Lobby lobby = newLobby(tempDir);
-        FakeWebSocket alice = new FakeWebSocket();
-        FakeWebSocket carol = new FakeWebSocket();
-
-        assertFalse(lobby.play(alice, "alice", 1200));
-        boolean matched = lobby.play(carol, "carol", 1350); // 150 apart - outside +-100
-
-        assertFalse(matched);
-        assertTrue(carol.sentMessages.isEmpty());
-    }
-
-    @Test void testAThirdQueuedPlayerCanStillMatchAnEarlierOneInRange(@TempDir Path tempDir) {
-        Lobby lobby = newLobby(tempDir);
-        FakeWebSocket alice = new FakeWebSocket();
-        FakeWebSocket carol = new FakeWebSocket();
-        FakeWebSocket dave = new FakeWebSocket();
-
-        assertFalse(lobby.play(alice, "alice", 1200));
-        assertFalse(lobby.play(carol, "carol", 1350)); // queued too, out of range of alice
-        boolean matched = lobby.play(dave, "dave", 1310); // within range of carol (1350), not alice (1200, 110 apart)
-
-        assertTrue(matched);
-        assertTrue(carol.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
-        assertTrue(dave.sentMessages.stream().anyMatch(m -> m.startsWith("WELCOME")));
-        assertTrue(alice.sentMessages.isEmpty()); // still waiting
+        assertSame(lobby.sessionOf(alice), lobby.sessionOf(bob));
     }
 
     @Test void testCreateRoomThenJoinRoomSeatsWhiteAndBlack(@TempDir Path tempDir) {
@@ -172,42 +127,6 @@ class LobbyTest {
         assertSame(session, lobby.sessionOf(alice));
     }
 
-    @Test void testCancelQueuedRemovesAWaitingPlayerSoTheyAreNotMatchedLater(@TempDir Path tempDir) {
-        Lobby lobby = newLobby(tempDir);
-        FakeWebSocket alice = new FakeWebSocket();
-        FakeWebSocket bob = new FakeWebSocket();
-
-        assertFalse(lobby.play(alice, "alice", 1200));
-        lobby.cancelQueued(alice);
-        boolean matched = lobby.play(bob, "bob", 1200);
-
-        assertFalse(matched); // alice was removed, so bob just queues instead of matching a stale entry
-    }
-
-    @Test void testPlayTimesOutAndTellsTheClientIfNoOpponentArrivesInTime(@TempDir Path tempDir) throws InterruptedException {
-        Lobby lobby = newLobbyWithShortMatchmakingTimeout(tempDir, 100L);
-        FakeWebSocket alice = new FakeWebSocket();
-
-        assertFalse(lobby.play(alice, "alice", 1200));
-        Thread.sleep(300);
-
-        assertTrue(alice.sentMessages.stream().anyMatch(m -> m.startsWith("ERROR")));
-    }
-
-    @Test void testPlayDoesNotTimeOutOnceAlreadyMatched(@TempDir Path tempDir) throws InterruptedException {
-        Lobby lobby = newLobbyWithShortMatchmakingTimeout(tempDir, 100L);
-        FakeWebSocket alice = new FakeWebSocket();
-        FakeWebSocket bob = new FakeWebSocket();
-
-        assertFalse(lobby.play(alice, "alice", 1200));
-        assertTrue(lobby.play(bob, "bob", 1200));
-        alice.sentMessages.clear(); // drop the WELCOME/STATE greeting so only a stray timeout ERROR would show up below
-        Thread.sleep(300); // the game's own ticker keeps sending fresh STATE messages in the meantime - that's expected
-
-        assertFalse(alice.sentMessages.stream().anyMatch(m -> m.startsWith("ERROR")),
-                "a matched player must not also receive a stale timeout error");
-    }
-
     @Test void testTryReconnectRestoresADisconnectedPlayerToTheSameRoom(@TempDir Path tempDir) {
         Lobby lobby = newLobby(tempDir);
         FakeWebSocket alice = new FakeWebSocket();
@@ -262,9 +181,6 @@ class LobbyTest {
         // alice doesn't want a rematch - she wants a new game, which must not be swallowed by the dead session
         assertTrue(lobby.leaveFinishedSessionIfAny(aliceAgain));
         assertNull(lobby.sessionOf(aliceAgain), "leaving the finished session must free this connection for normal lobby routing");
-
-        boolean matched = lobby.play(aliceAgain, "alice", 1200);
-        assertFalse(matched); // no opponent queued yet - just proves play() ran normally instead of being routed into the old session
     }
 
     @Test void testLeaveFinishedSessionIfAnyIsANoOpWhileTheGameIsStillInProgress(@TempDir Path tempDir) {

@@ -1,6 +1,8 @@
-package server;
+package server.room;
 
-/** {@link RoomCreator} for when {@code HttpApiServer} is still embedded in the same process as {@code Lobby} - the local/offline, single-process topology (see KungFuChessServer). Just delegates directly. */
+import server.Lobby;
+
+/** {@link RoomCreator} for when {@code HttpApiServer} is still embedded in the same process as {@code Lobby} - the local/offline, single-process topology (see KungFuChessServerService). Just delegates directly. */
 public class LocalRoomCreator implements RoomCreator {
     private final Lobby lobby;
 

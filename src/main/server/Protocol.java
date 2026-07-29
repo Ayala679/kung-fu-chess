@@ -9,7 +9,7 @@ package server;
  *
  * login/register/room-creation are non-realtime and go over REST now (see
  * HttpApiServer) - LOGIN/REGISTER below stay as the internal mode markers
- * reused when building the string passed into AuthController.handleAuth,
+ * reused when building the string passed into AuthService.handleAuth,
  * and AUTH_OK/ROOM_CREATED/ERROR are reused verbatim as HTTP response
  * bodies. Everything actually live (matchmaking wait, gameplay, state)
  * stays on the WebSocket: the connection's first message is now
@@ -25,10 +25,10 @@ package server;
 public final class Protocol {
     private Protocol() {}
 
-    /** Internal auth mode marker (REST path suffix / AuthController.handleAuth prefix), not a WS verb any more. */
+    /** Internal auth mode marker (REST path suffix / AuthService.handleAuth prefix), not a WS verb any more. */
     public static final String LOGIN = "login";
 
-    /** Internal auth mode marker (REST path suffix / AuthController.handleAuth prefix), not a WS verb any more. */
+    /** Internal auth mode marker (REST path suffix / AuthService.handleAuth prefix), not a WS verb any more. */
     public static final String REGISTER = "register";
 
     /** WS client -> server, first message on a new connection: {@code "attach <token>"} (token from the REST login/register call). */

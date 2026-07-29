@@ -1,8 +1,8 @@
-package server;
+package server.connection;
 
 import org.java_websocket.WebSocket;
 
-/** {@link OutboundConnection} wrapping a real {@code WebSocket} - the local/offline topology, where {@code KungFuChessServer} still embeds {@code Lobby}/{@code GameSession} directly. */
+/** {@link OutboundConnection} wrapping a real {@code WebSocket} - the local/offline topology, where {@code KungFuChessServerService} still embeds {@code Lobby}/{@code GameSession} directly. */
 public class LocalOutboundConnection implements OutboundConnection {
     private final WebSocket socket;
 

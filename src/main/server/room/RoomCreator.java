@@ -1,4 +1,4 @@
-package server;
+package server.room;
 
 /**
  * "Create a fresh room, return its code" - what {@code HttpApiServer}'s

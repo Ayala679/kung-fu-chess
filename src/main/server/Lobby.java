@@ -1,86 +1,95 @@
 package server;
 
 import java.security.SecureRandom;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 
 import bus.Bus;
 import logging.ActivityLog;
 import server.auth.UserRepository;
+import server.connection.OutboundConnection;
+import server.reconnect.ReconnectRegistry;
+import server.room.InMemoryRoomDirectory;
+import server.room.RoomDirectory;
 
 /**
- * The "tournament manager": opens rooms, matches waiting players by ELO, and
- * hands each connection off to the right GameSession. Everything
- * about actually playing a game - including greeting a connection once it's
- * actually seated (WELCOME + board snapshot) - is delegated entirely to
- * GameSession/GameEngine; this class only ever decides WHICH session a
- * connection belongs to.
+ * The "tournament manager": opens rooms and hands each connection off to the
+ * right GameSession. Everything about actually playing a game - including
+ * greeting a connection once it's actually seated (WELCOME + board
+ * snapshot) - is delegated entirely to GameSession/GameEngine; this class
+ * only ever decides WHICH session a connection belongs to. Quick-match
+ * pairing itself lives in the separate {@link MatchQueue}/{@code
+ * server.MatchmakerController} - see {@link #seatMatchedPair} for the hand-off point.
  */
 public class Lobby {
-    private static final int MATCHMAKING_ELO_RANGE = 100;
     private static final String ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int ROOM_CODE_LENGTH = 6;
-    private static final long DEFAULT_MATCHMAKING_TIMEOUT_MILLIS = 60_000L;
     private static final long DEFAULT_DISCONNECT_GRACE_MILLIS = 20_000L;
 
     private final Bus bus;
     private final UserRepository userRepository;
     private final ActivityLog activityLog;
     private final ReconnectRegistry reconnectRegistry;
-    private final long matchmakingTimeoutMillis;
     private final long disconnectGraceMillis;
+    private final String shardId;
+    private final RoomDirectory roomDirectory;
     private final SecureRandom random = new SecureRandom();
-    private final ScheduledExecutorService matchmakingScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "lobby-matchmaking-timeout");
-        t.setDaemon(true);
-        return t;
-    });
 
     private final Map<String, GameSession> rooms = new ConcurrentHashMap<>();
     private final Map<OutboundConnection, GameSession> sessionByConnection = new ConcurrentHashMap<>();
-    private final List<Waiting> matchmakingQueue = new ArrayList<>();
 
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry) {
-        this(bus, userRepository, activityLog, reconnectRegistry, DEFAULT_MATCHMAKING_TIMEOUT_MILLIS, DEFAULT_DISCONNECT_GRACE_MILLIS);
+        this(bus, userRepository, activityLog, reconnectRegistry, DEFAULT_DISCONNECT_GRACE_MILLIS);
     }
 
     /**
-     * Same as the 4-arg constructor, with the "give up waiting" timeout for
-     * {@link #play} given explicitly (in milliseconds) instead of the
-     * default 60 seconds - so tests can use a short delay instead of
-     * actually waiting a minute.
-     */
-    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
-                 long matchmakingTimeoutMillis) {
-        this(bus, userRepository, activityLog, reconnectRegistry, matchmakingTimeoutMillis, DEFAULT_DISCONNECT_GRACE_MILLIS);
-    }
-
-    /**
-     * Same as the 5-arg constructor, with the disconnect-&gt;abandon grace
+     * Same as the 4-arg constructor, with the disconnect-&gt;abandon grace
      * period every GameSession this Lobby creates is given (see
-     * GameSession's own same-named constructor param) also given explicitly
+     * GameSession's own same-named constructor param) given explicitly
      * instead of the default 20 seconds - so tests can exercise the
      * abandon/leaveFinishedSessionIfAny flow without actually waiting.
      */
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
-                 long matchmakingTimeoutMillis, long disconnectGraceMillis) {
+                 long disconnectGraceMillis) {
+        this(bus, userRepository, activityLog, reconnectRegistry, disconnectGraceMillis, null, new InMemoryRoomDirectory());
+    }
+
+    /**
+     * Same as the 5-arg constructor, with this Lobby's own shard identity
+     * and the shared {@link RoomDirectory} given explicitly - used only by
+     * the distributed topology (see server.GameServerShardController), where more
+     * than one Game Server Shard process exists and every newly-minted room
+     * code needs to be recorded (see {@link #createRoom}/{@link
+     * #seatMatchedPair}) so the WS Gateway can later route a {@code
+     * join_room} to the right one. {@code shardId} is null (and {@code
+     * roomDirectory} an unused {@link InMemoryRoomDirectory}) in every other
+     * case - local/offline runs and every unit test - where there's only
+     * ever one implicit shard and nothing to route between.
+     */
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
+                 long disconnectGraceMillis, String shardId, RoomDirectory roomDirectory) {
         this.bus = bus;
         this.userRepository = userRepository;
         this.activityLog = activityLog;
         this.reconnectRegistry = reconnectRegistry;
-        this.matchmakingTimeoutMillis = matchmakingTimeoutMillis;
         this.disconnectGraceMillis = disconnectGraceMillis;
+        this.shardId = shardId;
+        this.roomDirectory = roomDirectory;
     }
 
     public GameSession sessionOf(OutboundConnection connection) {
         return sessionByConnection.get(connection);
+    }
+
+    /** This Lobby's own shard identity (see the 7-arg constructor) - null outside the distributed, multi-shard topology. */
+    public String getShardId() {
+        return shardId;
+    }
+
+    // Records this shard as the owner of a freshly-minted room code (see RoomDirectory) - a no-op when there's only one implicit shard (shardId == null).
+    private void recordShardOwnership(String code) {
+        if (shardId != null) roomDirectory.record(code, shardId);
     }
 
     /**
@@ -95,6 +104,7 @@ public class Lobby {
         String code = newRoomCode();
         GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
         rooms.put(code, session);
+        recordShardOwnership(code);
         activityLog.log("room=" + code + " reserved by " + username);
         return code;
     }
@@ -138,7 +148,7 @@ public class Lobby {
     }
 
     /**
-     * Called by KungFuChessServer when a connection sends "play" or
+     * Called by KungFuChessServerService when a connection sends "play" or
      * "join_room &lt;code&gt;" while still mapped (via tryReconnect, above)
      * to a session whose game has already ended - vacates that connection's
      * seat exactly like a real disconnect (GameSession.handleDisconnect)
@@ -161,66 +171,35 @@ public class Lobby {
     }
 
     /**
-     * "play": pairs with any currently-waiting player within +-100 ELO and
-     * returns true (GameSession.join itself greets both sides - WELCOME +
-     * initial snapshot - the moment the second one joins). If no one
-     * waiting is close enough, this connection joins the queue and false is
-     * returned (caller sends WAITING); if no opponent arrives within
-     * {@link #matchmakingTimeoutMillis}, it's removed from the queue and
-     * sent an explicit ERROR instead of waiting forever.
+     * Seats two players {@link MatchQueue} just paired into a fresh room
+     * (GameSession.join itself greets both sides - WELCOME + initial
+     * snapshot - the moment the second one joins). This is exactly what
+     * {@code Lobby.play}'s old "matched" branch used to do inline, before
+     * quick-match pairing moved out into the separate {@link MatchQueue}/
+     * {@code server.MatchmakerController} - called directly, in-process, by the
+     * embedded topology's local MatchQueue listener, or by {@code
+     * server.GameServerShardController} once it receives a {@link SeatPairEnvelope}
+     * over NATS from the standalone Matchmaker process.
      */
-    public synchronized boolean play(OutboundConnection connection, String username, int rating) {
-        for (int i = 0; i < matchmakingQueue.size(); i++) {
-            Waiting candidate = matchmakingQueue.get(i);
-            if (Math.abs(candidate.rating - rating) <= MATCHMAKING_ELO_RANGE) {
-                matchmakingQueue.remove(i);
-                candidate.timeoutTask.cancel(false);
+    public void seatMatchedPair(OutboundConnection connectionA, String usernameA, int ratingA,
+                                 OutboundConnection connectionB, String usernameB, int ratingB) {
+        String code = newRoomCode();
+        GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
+        rooms.put(code, session);
+        recordShardOwnership(code);
 
-                String code = newRoomCode();
-                GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
-                rooms.put(code, session);
+        session.join(connectionA, usernameA, ratingA);
+        session.join(connectionB, usernameB, ratingB);
+        sessionByConnection.put(connectionA, session);
+        sessionByConnection.put(connectionB, session);
+        reconnectRegistry.record(usernameA, code);
+        reconnectRegistry.record(usernameB, code);
 
-                session.join(candidate.connection, candidate.username, candidate.rating);
-                session.join(connection, username, rating);
-                sessionByConnection.put(candidate.connection, session);
-                sessionByConnection.put(connection, session);
-                reconnectRegistry.record(candidate.username, code);
-                reconnectRegistry.record(username, code);
-
-                activityLog.log("room=" + code + " quick-match: " + candidate.username + " vs " + username);
-                return true;
-            }
-        }
-        Waiting waiting = new Waiting(connection, username, rating);
-        waiting.timeoutTask = matchmakingScheduler.schedule(() -> handleMatchmakingTimeout(waiting),
-                matchmakingTimeoutMillis, TimeUnit.MILLISECONDS);
-        matchmakingQueue.add(waiting);
-        activityLog.log(username + " (" + rating + ") queued for quick-match");
-        return false;
+        activityLog.log("room=" + code + " quick-match: " + usernameA + " vs " + usernameB);
     }
 
-    /** No opponent showed up within the timeout - drop the entry and tell the client clearly, instead of leaving them waiting forever. */
-    private synchronized void handleMatchmakingTimeout(Waiting waiting) {
-        if (!matchmakingQueue.remove(waiting)) return; // already matched (or already cancelled) in the meantime
-        activityLog.log(waiting.username + " quick-match timed out after " + matchmakingTimeoutMillis + "ms");
-        if (waiting.connection.isOpen()) {
-            waiting.connection.send(Protocol.ERROR + "|no opponent found within "
-                    + (matchmakingTimeoutMillis / 1000) + " seconds - try again");
-        }
-    }
-
-    /** Removes a still-queued (not yet matched) connection - safe to call even if it was never queued. */
-    public synchronized void cancelQueued(OutboundConnection connection) {
-        matchmakingQueue.removeIf(w -> {
-            if (w.connection != connection) return false;
-            w.timeoutTask.cancel(false);
-            return true;
-        });
-    }
-
-    /** A connection dropped: forget it, and let its GameSession (if any) handle the forfeit/spectator-removal. */
+    /** A connection dropped: forget it, and let its GameSession (if any) handle the forfeit/spectator-removal. Matchmaking-queue membership (if any) is a separate concern - see MatchQueue.cancelQueued, called independently by whoever owns that connection's MatchQueue. */
     public void handleDisconnect(OutboundConnection connection) {
-        cancelQueued(connection);
         GameSession session = sessionByConnection.remove(connection);
         if (session != null) session.handleDisconnect(connection);
     }
@@ -236,18 +215,5 @@ public class Lobby {
             code = sb.toString();
         } while (rooms.containsKey(code));
         return code;
-    }
-
-    private static final class Waiting {
-        final OutboundConnection connection;
-        final String username;
-        final int rating;
-        ScheduledFuture<?> timeoutTask;
-
-        Waiting(OutboundConnection connection, String username, int rating) {
-            this.connection = connection;
-            this.username = username;
-            this.rating = rating;
-        }
     }
 }

@@ -1,7 +1,9 @@
-# Builds and runs the Kung Fu Chess server (server.KungFuChessServer - the
-# WebSocket game server + its REST API, see CLAUDE.md's "Networking"
-# section and Server_Design.md). The Swing client is never containerized -
-# it's a desktop GUI, run locally against this container's exposed ports.
+# Builds and runs the Kung Fu Chess server (server.main.KungFuChessServerMain
+# by default - the WebSocket game server + its REST API, see CLAUDE.md's
+# "Networking" section and Server_Design.md; docker-compose.yml overrides
+# the entrypoint per service for every other server process). The Swing
+# client is never containerized - it's a desktop GUI, run locally against
+# this container's exposed ports.
 #
 # No Maven/Gradle in this project (see CLAUDE.md) - this mirrors the exact
 # javac/@sources.txt invocation documented there. The lib jar
@@ -32,4 +34,4 @@ COPY --from=build /build/out ./out
 COPY --from=build /build/lib ./lib
 
 EXPOSE 8887 8888
-ENTRYPOINT ["java", "-cp", "out:lib/*", "server.KungFuChessServer"]
+ENTRYPOINT ["java", "-cp", "out:lib/*", "server.main.KungFuChessServerMain"]

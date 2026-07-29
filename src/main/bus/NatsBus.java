@@ -50,7 +50,7 @@ public class NatsBus implements Bus {
         connection.close();
     }
 
-    /** The underlying NATS connection this Bus already opened - reused by server.RoomCreationResponder for its own request-reply subscription instead of opening a second, redundant connection. */
+    /** The underlying NATS connection this Bus already opened - reused by server.GameServerShardController for its own request-reply subscription instead of opening a second, redundant connection. */
     public Connection rawConnection() {
         return connection;
     }

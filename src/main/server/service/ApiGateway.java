@@ -1,4 +1,4 @@
-package server;
+package server.service;
 
 import java.io.IOException;
 
@@ -6,31 +6,30 @@ import io.nats.client.Connection;
 import io.nats.client.Nats;
 
 import logging.ActivityLog;
-import server.auth.AuthController;
+import server.auth.AuthService;
 import server.auth.RedisSessionTokenStore;
 import server.auth.SessionTokenStore;
 import server.auth.UserRepository;
+import server.controller.HttpApiServer;
+import server.room.RemoteRoomCreator;
+import server.room.RoomCreator;
 
 /**
- * The API Gateway, standalone: everything non-realtime (login, register,
- * room creation - see HttpApiServer) as its own process, separate from the
- * WebSocket Gateway / Game Server Shard (KungFuChessServer). Only makes
+ * The API Gateway's wiring: everything non-realtime (login, register, room
+ * creation - see HttpApiServer, the actual REST endpoint layer) as its own
+ * process - see {@code server.main.ApiGatewayMain} for the entry point. Only makes
  * sense in the distributed (Docker Compose) topology - see
- * Server_Design.md's "Step 4" - so unlike KungFuChessServer, KFC_REDIS_URL
+ * Server_Design.md's "Step 4" - so unlike KungFuChessServerService, KFC_REDIS_URL
  * and KFC_NATS_URL are required here, not optional: this class has no
  * local/offline fallback mode of its own. Auth (UserRepository/
- * AuthController/SessionTokenStore) works identically to how
- * KungFuChessServer already does it - Postgres and Redis are already
+ * AuthService/SessionTokenStore) works identically to how
+ * KungFuChessServerService already does it - Postgres and Redis are already
  * genuine shared, multi-process-safe stores, nothing new. Room creation is
  * the one thing that can't be done locally - see RemoteRoomCreator, which
- * sends a real NATS request to whichever process owns the Lobby
- * (RoomCreationResponder, inside KungFuChessServer).
+ * sends a real NATS request to whichever process owns the Lobby (a
+ * GameServerShardController, handled inside GameServerShardMain).
  */
 public class ApiGateway {
-    private static final int DEFAULT_HTTP_PORT = 8888;
-    private static final String DEFAULT_DB_PATH = "data/kungfuchess.db";
-    private static final String DEFAULT_LOG_PATH = "logs/api-gateway.log";
-
     private final HttpApiServer httpApiServer;
     private final Connection natsConnection;
 
@@ -40,7 +39,7 @@ public class ApiGateway {
 
         UserRepository userRepository = new UserRepository(dbUrlOrPath);
         ActivityLog activityLog = new ActivityLog(logPath);
-        AuthController authController = new AuthController(userRepository, activityLog);
+        AuthService authService = new AuthService(userRepository, activityLog);
         SessionTokenStore sessionTokenStore = new RedisSessionTokenStore(redisUrl);
 
         try {
@@ -51,7 +50,7 @@ public class ApiGateway {
         RoomCreator roomCreator = new RemoteRoomCreator(natsConnection);
 
         try {
-            this.httpApiServer = new HttpApiServer(httpPort, authController, sessionTokenStore, roomCreator, activityLog);
+            this.httpApiServer = new HttpApiServer(httpPort, authService, sessionTokenStore, roomCreator, activityLog);
         } catch (IOException e) {
             throw new IllegalStateException("Could not start HTTP API server on port " + httpPort, e);
         }
@@ -65,28 +64,5 @@ public class ApiGateway {
     public void stop() throws InterruptedException {
         httpApiServer.stop();
         natsConnection.close();
-    }
-
-    public static void main(String[] args) {
-        int httpPort = envInt("KFC_HTTP_PORT", DEFAULT_HTTP_PORT);
-        String dbUrlOrPath = System.getenv().getOrDefault("KFC_DB_URL", DEFAULT_DB_PATH);
-        String logPath = System.getenv().getOrDefault("KFC_LOG_PATH", DEFAULT_LOG_PATH);
-        String redisUrl = System.getenv("KFC_REDIS_URL");
-        String natsUrl = System.getenv("KFC_NATS_URL");
-
-        ApiGateway gateway = new ApiGateway(httpPort, dbUrlOrPath, logPath, redisUrl, natsUrl);
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            try {
-                gateway.stop();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }));
-        gateway.start();
-    }
-
-    private static int envInt(String name, int defaultValue) {
-        String value = System.getenv(name);
-        return value != null ? Integer.parseInt(value) : defaultValue;
     }
 }

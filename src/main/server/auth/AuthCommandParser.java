@@ -6,7 +6,7 @@ import server.Protocol;
  * The single place that knows the raw "login/register &lt;username&gt;
  * &lt;password&gt;" wire text shape - mirrors how parsing.BoardMapper/
  * PieceMapper are kept separate from the engine that consumes their output.
- * {@link AuthController} calls this instead of splitting strings itself;
+ * {@link AuthService} calls this instead of splitting strings itself;
  * {@link UserRepository} (the service) never sees raw wire text at all.
  */
 public final class AuthCommandParser {

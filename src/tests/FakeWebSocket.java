@@ -15,7 +15,7 @@ import org.java_websocket.enums.ReadyState;
 import org.java_websocket.framing.Framedata;
 import org.java_websocket.protocols.IProtocol;
 
-import server.OutboundConnection;
+import server.connection.OutboundConnection;
 
 /**
  * Minimal WebSocket test double: identity stands in for "a connection",

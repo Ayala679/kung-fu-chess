@@ -14,7 +14,7 @@ import java.util.function.Consumer;
  * {@link InMemoryBus} is what every unit test uses (no external service
  * needed, exactly like a bare SQLite path for UserRepository); {@link
  * NatsBus} is what the Docker Compose deployment uses, selected by
- * KungFuChessServer based on whether KFC_NATS_URL is set.
+ * KungFuChessServerService based on whether KFC_NATS_URL is set.
  */
 public interface Bus {
     /** Subscribe to a topic; returns a handle that {@link #unsubscribe} can later remove. */

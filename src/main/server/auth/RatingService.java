@@ -5,7 +5,7 @@ package server.auth;
  * ratings via EloCalculator and persists them through UserRepository. Kept
  * separate from GameSession so "what happens to ratings when a game ends" is
  * one small, independently readable unit, the same way AuthCommandParser/
- * AuthController were split out of the auth flow.
+ * AuthService were split out of the auth flow.
  */
 public class RatingService {
     private final UserRepository userRepository;

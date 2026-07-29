@@ -1,4 +1,4 @@
-package server;
+package server.connection;
 
 /**
  * Everything {@code Lobby}/{@code GameSession} actually need from "a

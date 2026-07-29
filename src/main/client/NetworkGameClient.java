@@ -21,7 +21,7 @@ import server.SnapshotCodec;
 import snapshot.GameSnapshot;
 
 /**
- * Client-side counterpart to server.KungFuChessServer/HttpApiServer/Lobby/
+ * Client-side counterpart to server.KungFuChessServerService/HttpApiServer/Lobby/
  * GameSession. Two stages: authenticate, then pick a game (quick-match
  * "play", or create/join a room) - the latter is inherently asynchronous
  * (the server may reply WAITING and only send a WELCOME once an opponent

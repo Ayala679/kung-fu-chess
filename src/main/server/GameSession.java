@@ -21,6 +21,7 @@ import model.Position;
 import parsing.BoardMapper;
 import server.auth.RatingService;
 import server.auth.UserRepository;
+import server.connection.OutboundConnection;
 import snapshot.GameSnapshot;
 import snapshot.MoveNotation;
 
@@ -229,7 +230,7 @@ public class GameSession {
 
     /**
      * True once the current game has ended (a real win/resignation, or a
-     * no-winner abandon) - used by KungFuChessServer to tell a "play"/
+     * no-winner abandon) - used by KungFuChessServerService to tell a "play"/
      * "join_room" sent by a connection still mapped to this (finished)
      * session apart from "rematch": the former should leave this session
      * (see handleDisconnect) and fall through to normal lobby handling
@@ -270,7 +271,7 @@ public class GameSession {
      * of its effect - a mere selection change and a real move both count),
      * a rejected one gets {@code ERROR|<reason>} instead; an unrecognized
      * connection (seat == null) gets neither, since that should never
-     * happen given how KungFuChessServer routes messages.
+     * happen given how KungFuChessServerService routes messages.
      */
     public void handleCommand(OutboundConnection connection, String command) {
         // No per-call entry/exit log here on purpose - a fast real-time game

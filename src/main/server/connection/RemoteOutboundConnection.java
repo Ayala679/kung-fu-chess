@@ -1,4 +1,4 @@
-package server;
+package server.connection;
 
 import java.nio.charset.StandardCharsets;
 
@@ -9,10 +9,10 @@ import io.nats.client.Connection;
  * Server Shard never holds a real {@code WebSocket} (only the WS Gateway
  * process that accepted the TCP connection can), so {@code send} just
  * publishes to that one connection's own NATS subject; the Gateway is
- * already subscribed to it (see KungFuChessServer) and relays verbatim to
+ * already subscribed to it (see KungFuChessServerService) and relays verbatim to
  * the real socket. {@code isOpen} reflects the last disconnect
  * notification the Shard received for this connectionId (see
- * GameServerShard) - not a live query, since the Shard has no direct way
+ * GameServerShardController) - not a live query, since the Shard has no direct way
  * to ask the Gateway's socket state.
  */
 public class RemoteOutboundConnection implements OutboundConnection {
@@ -40,7 +40,7 @@ public class RemoteOutboundConnection implements OutboundConnection {
         return open;
     }
 
-    /** Called by GameServerShard once it receives a "gateway.disconnect" notification for this connectionId. */
+    /** Called by GameServerShardController once it receives a "gateway.disconnect" notification for this connectionId. */
     public void markClosed() {
         open = false;
     }

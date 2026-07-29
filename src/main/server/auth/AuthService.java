@@ -3,25 +3,26 @@ package server.auth;
 import logging.ActivityLog;
 
 /**
- * Controller for the login/register step of the wire protocol: takes the
+ * Service for the login/register step of the wire protocol: takes the
  * command {@link AuthCommandParser} already parsed and calls into
- * {@link UserRepository} - the service that actually owns account logic and
- * persistence - to carry it out. Kept separate from
- * {@code server.KungFuChessServer} so this orchestration (and logging of the
- * outcome) isn't mixed into WebSocket connection bookkeeping; the server
- * still owns the connection itself (sending the reply, closing on failure).
- * Does not parse raw wire text itself - see {@link AuthCommandParser}.
+ * {@link UserRepository} - the repository that actually owns account logic
+ * and persistence - to carry it out. Kept separate from {@code
+ * server.KungFuChessServerService}/{@code server.HttpApiServer} so this
+ * orchestration (and logging of the outcome) isn't mixed into WebSocket/HTTP
+ * connection bookkeeping; the caller still owns the connection itself
+ * (sending the reply, closing on failure). Does not parse raw wire text
+ * itself - see {@link AuthCommandParser}.
  */
-public class AuthController {
+public class AuthService {
     private final UserRepository userRepository;
     private final ActivityLog activityLog;
 
-    public AuthController(UserRepository userRepository, ActivityLog activityLog) {
+    public AuthService(UserRepository userRepository, ActivityLog activityLog) {
         this.userRepository = userRepository;
         this.activityLog = activityLog;
     }
 
-    /** The result of handling one raw auth message - either malformed, or a service-level AuthResult for a given username. */
+    /** The result of handling one raw auth message - either malformed, or a repository-level AuthResult for a given username. */
     public static final class Outcome {
         private final boolean malformed;
         private final String username;
@@ -48,8 +49,8 @@ public class AuthController {
      * Guards against an unexpected failure in the repository (e.g. the
      * SQLite file becoming unreadable mid-session) - without this, an
      * uncaught exception here would propagate all the way up through
-     * server.KungFuChessServer.onMessage's own try/catch, leaving the
-     * connection with no reply at all instead of a clean ERROR.
+     * server.KungFuChessServerService.handleMessage's own try/catch, leaving
+     * the connection with no reply at all instead of a clean ERROR.
      */
     public Outcome handleAuth(String message) {
         AuthCommandParser.ParsedCommand parsed = AuthCommandParser.parse(message);

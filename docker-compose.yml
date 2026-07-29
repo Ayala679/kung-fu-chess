@@ -1,11 +1,12 @@
 # Working containerized step for the Kung Fu Chess server - see
 # Server_Design.md for the roadmap and what's deliberately still not
-# covered (a real Game Allocator, multiple Game Server Shards, K8s).
-# `api-gateway`, `ws-gateway`, and `game-server-shard` are three genuinely
-# separate processes/containers now, talking to each other only over
-# redis/nats, never a direct Java call - see Server_Design.md's "Step 4"
-# and "Step 5". The Swing client is never containerized - run it locally
-# (see CLAUDE.md) against the ports this exposes.
+# covered (Observability, K8s). `api-gateway`, `ws-gateway`, `matchmaker`,
+# `game-allocator`, and two `game-server-shard-*` instances are seven
+# genuinely separate processes/containers now, talking to each other only
+# over redis/nats, never a direct Java call - see Server_Design.md's
+# "Step 4", "Step 5", and "Step 6a". The Swing client is never
+# containerized - run it locally (see CLAUDE.md) against the ports this
+# exposes.
 #
 # Requires a .env file (git-ignored, never committed) with POSTGRES_PASSWORD
 # set - copy .env.example to .env and edit it before running
@@ -45,11 +46,11 @@ services:
 
   ws-gateway:
     build: .
-    # Distributed topology: KungFuChessServer detects KFC_REDIS_URL +
+    # Distributed topology: KungFuChessServerService detects KFC_REDIS_URL +
     # KFC_NATS_URL both set and becomes a pure relay - no Lobby/Postgres
     # access of its own, so KFC_DB_URL is deliberately not passed here (see
     # Server_Design.md's "Step 5"; the entrypoint stays the Dockerfile's
-    # default server.KungFuChessServer, unlike api-gateway/game-server-shard
+    # default server.main.KungFuChessServerMain, unlike api-gateway/game-server-shard
     # below).
     depends_on:
       redis:
@@ -66,9 +67,14 @@ services:
     volumes:
       - ./logs:/app/logs
 
-  game-server-shard:
+  # Two Game Server Shard instances (Step 6a) - plain Compose has no
+  # per-replica env var templating (that needs Swarm), so two explicit,
+  # near-identical services is simpler than fighting `--scale` for this.
+  # Each gets its own KFC_SHARD_ID; server.controller.GameAllocatorController
+  # round-robins new rooms across whatever KFC_SHARD_IDS lists below.
+  game-server-shard-1:
     build: .
-    entrypoint: ["java", "-cp", "out:lib/*", "server.GameServerShard"]
+    entrypoint: ["java", "-cp", "out:lib/*", "server.main.GameServerShardMain"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,21 +86,71 @@ services:
       KFC_DB_URL: "jdbc:postgresql://postgres:5432/kungfuchess?user=kungfuchess&password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a .env file - see .env.example}"
       KFC_REDIS_URL: "redis://redis:6379"
       KFC_NATS_URL: "nats://nats:4222"
-      KFC_LOG_PATH: "logs/game-server-shard.log"
+      KFC_SHARD_ID: "shard-1"
+      KFC_LOG_PATH: "logs/game-server-shard-1.log"
     # No published ports - only reachable over NATS/Redis/Postgres, exactly
     # like a real internal service (nothing outside this compose network
     # ever talks to it directly).
     volumes:
       - ./logs:/app/logs
 
+  game-server-shard-2:
+    build: .
+    entrypoint: ["java", "-cp", "out:lib/*", "server.main.GameServerShardMain"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      KFC_DB_URL: "jdbc:postgresql://postgres:5432/kungfuchess?user=kungfuchess&password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a .env file - see .env.example}"
+      KFC_REDIS_URL: "redis://redis:6379"
+      KFC_NATS_URL: "nats://nats:4222"
+      KFC_SHARD_ID: "shard-2"
+      KFC_LOG_PATH: "logs/game-server-shard-2.log"
+    volumes:
+      - ./logs:/app/logs
+
+  game-allocator:
+    build: .
+    entrypoint: ["java", "-cp", "out:lib/*", "server.main.GameAllocatorMain"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      KFC_NATS_URL: "nats://nats:4222"
+      KFC_SHARD_IDS: "shard-1,shard-2"
+      KFC_LOG_PATH: "logs/game-allocator.log"
+    # No published ports, no Postgres/Redis access - round-robin over a
+    # static shard list is pure in-memory state (see server.ShardPicker).
+    volumes:
+      - ./logs:/app/logs
+
+  matchmaker:
+    build: .
+    entrypoint: ["java", "-cp", "out:lib/*", "server.main.MatchmakerMain"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      KFC_NATS_URL: "nats://nats:4222"
+      KFC_LOG_PATH: "logs/matchmaker.log"
+    # No published ports, no Postgres/Redis access - MatchQueue is pure
+    # in-memory ELO pairing logic (see server.service.MatchmakerService's
+    # Javadoc and Server_Design.md's "Step 5").
+    volumes:
+      - ./logs:/app/logs
+
   api-gateway:
     build: .
-    # The Dockerfile bakes in ENTRYPOINT ["java", "-cp", "out:lib/*", "server.KungFuChessServer"] -
+    # The Dockerfile bakes in ENTRYPOINT ["java", "-cp", "out:lib/*", "server.main.KungFuChessServerMain"] -
     # Compose's `command:` only supplies/replaces CMD, which gets appended
     # to that ENTRYPOINT rather than replacing it, so `entrypoint:` has to
     # be overridden here too, or this ends up literally running
-    # `... server.KungFuChessServer java -cp out:lib/* server.ApiGateway`.
-    entrypoint: ["java", "-cp", "out:lib/*", "server.ApiGateway"]
+    # `... server.main.KungFuChessServerMain java -cp out:lib/* server.main.ApiGatewayMain`.
+    entrypoint: ["java", "-cp", "out:lib/*", "server.main.ApiGatewayMain"]
     depends_on:
       postgres:
         condition: service_healthy

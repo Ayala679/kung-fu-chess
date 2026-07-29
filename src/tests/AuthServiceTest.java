@@ -7,16 +7,16 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 import logging.ActivityLog;
-import server.auth.AuthController;
+import server.auth.AuthService;
 import server.auth.UserRepository;
 
-class AuthControllerTest {
+class AuthServiceTest {
 
     @Test void testRegisterCommandCreatesAnAccountWithTheStartingRating(@TempDir Path tempDir) {
         UserRepository repo = new UserRepository(tempDir.resolve("users.db").toString());
-        AuthController controller = new AuthController(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
+        AuthService service = new AuthService(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
 
-        AuthController.Outcome outcome = controller.handleAuth("register alice hunter2");
+        AuthService.Outcome outcome = service.handleAuth("register alice hunter2");
 
         assertFalse(outcome.isMalformed());
         assertEquals("alice", outcome.getUsername());
@@ -27,9 +27,9 @@ class AuthControllerTest {
     @Test void testLoginCommandAuthenticatesAgainstAnExistingAccount(@TempDir Path tempDir) {
         UserRepository repo = new UserRepository(tempDir.resolve("users.db").toString());
         repo.register("alice", "hunter2");
-        AuthController controller = new AuthController(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
+        AuthService service = new AuthService(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
 
-        AuthController.Outcome outcome = controller.handleAuth("login alice hunter2");
+        AuthService.Outcome outcome = service.handleAuth("login alice hunter2");
 
         assertFalse(outcome.isMalformed());
         assertTrue(outcome.getResult().isSuccess());
@@ -38,9 +38,9 @@ class AuthControllerTest {
     @Test void testLoginCommandFailsWithTheWrongPassword(@TempDir Path tempDir) {
         UserRepository repo = new UserRepository(tempDir.resolve("users.db").toString());
         repo.register("alice", "hunter2");
-        AuthController controller = new AuthController(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
+        AuthService service = new AuthService(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
 
-        AuthController.Outcome outcome = controller.handleAuth("login alice wrongpassword");
+        AuthService.Outcome outcome = service.handleAuth("login alice wrongpassword");
 
         assertFalse(outcome.isMalformed());
         assertFalse(outcome.getResult().isSuccess());
@@ -49,9 +49,9 @@ class AuthControllerTest {
 
     @Test void testAnUnknownCommandIsReportedAsMalformed(@TempDir Path tempDir) {
         UserRepository repo = new UserRepository(tempDir.resolve("users.db").toString());
-        AuthController controller = new AuthController(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
+        AuthService service = new AuthService(repo, new ActivityLog(tempDir.resolve("log.txt").toString()));
 
-        assertTrue(controller.handleAuth("play").isMalformed());
-        assertTrue(controller.handleAuth("login onlyusername").isMalformed());
+        assertTrue(service.handleAuth("play").isMalformed());
+        assertTrue(service.handleAuth("login onlyusername").isMalformed());
     }
 }
