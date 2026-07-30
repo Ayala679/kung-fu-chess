@@ -96,11 +96,6 @@ public class Lobby {
         return shardId;
     }
 
-    // Records this shard as the owner of a freshly-minted room code (see RoomDirectory) - a no-op when there's only one implicit shard (shardId == null).
-    private void recordShardOwnership(String code) {
-        if (shardId != null) roomDirectory.record(code, shardId);
-    }
-
     /**
      * REST "create room" (server.HttpApiServer): mints a fresh room code and
      * registers an empty GameSession - no seat yet, since a REST call has no
@@ -110,10 +105,9 @@ public class Lobby {
      * becomes White, so this deliberately doesn't special-case "the creator".
      */
     public String createRoom(String username) {
-        String code = newRoomCode();
+        String code = reserveRoomCode();
         GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
         rooms.put(code, session);
-        recordShardOwnership(code);
         activityLog.log("room=" + code + " reserved by " + username);
         return code;
     }
@@ -173,9 +167,13 @@ public class Lobby {
     public boolean leaveFinishedSessionIfAny(OutboundConnection connection) {
         GameSession session = sessionByConnection.get(connection);
         if (session == null || !session.isGameOver()) return false;
-        session.handleDisconnect(connection);
+        // leaveAfterGameOver, not handleDisconnect: this connection is voluntarily
+        // moving on to a new game, not actually disconnecting - see GameSession's
+        // own Javadoc on leaveAfterGameOver for why those two must not share a path.
+        session.leaveAfterGameOver(connection);
         sessionByConnection.remove(connection);
         activityLog.log("room=" + session.getRoomCode() + " left (game already over) to start a new game");
+        retireIfDone(session);
         return true;
     }
 
@@ -192,10 +190,9 @@ public class Lobby {
      */
     public void seatMatchedPair(OutboundConnection connectionA, String usernameA, int ratingA,
                                  OutboundConnection connectionB, String usernameB, int ratingB) {
-        String code = newRoomCode();
+        String code = reserveRoomCode();
         GameSession session = new GameSession(bus, code, userRepository, activityLog, disconnectGraceMillis);
         rooms.put(code, session);
-        recordShardOwnership(code);
 
         session.join(connectionA, usernameA, ratingA);
         session.join(connectionB, usernameB, ratingB);
@@ -207,22 +204,73 @@ public class Lobby {
         activityLog.log("room=" + code + " quick-match: " + usernameA + " vs " + usernameB);
     }
 
-    /** A connection dropped: forget it, and let its GameSession (if any) handle the forfeit/spectator-removal. Matchmaking-queue membership (if any) is a separate concern - see MatchQueue.cancelQueued, called independently by whoever owns that connection's MatchQueue. */
+    /**
+     * A connection dropped: forget it, and let its GameSession (if any)
+     * handle the forfeit/spectator-removal. Matchmaking-queue membership (if
+     * any) is a separate concern - see MatchQueue.cancelQueued, called
+     * independently by whoever owns that connection's MatchQueue.
+     *
+     * Deliberately does NOT retire the room even if this leaves it fully
+     * empty - a genuine disconnect (unlike {@link #leaveFinishedSessionIfAny}'s
+     * voluntary departure) must never forfeit the chance to reconnect, even
+     * into an already-finished game (see GameSession.reconnect's own Javadoc:
+     * that's exactly how a rematch happens after both sides disconnect). A
+     * room is only ever retired once every seat has actively, explicitly
+     * moved on - see {@link #retireIfDone}.
+     */
     public void handleDisconnect(OutboundConnection connection) {
         GameSession session = sessionByConnection.remove(connection);
-        if (session != null) session.handleDisconnect(connection);
+        if (session == null) return;
+        session.handleDisconnect(connection);
     }
 
-    // Generates a random unused 6-char room code (retries on collision).
-    private String newRoomCode() {
-        String code;
-        do {
-            StringBuilder sb = new StringBuilder(ROOM_CODE_LENGTH);
-            for (int i = 0; i < ROOM_CODE_LENGTH; i++) {
-                sb.append(ROOM_CODE_CHARS.charAt(random.nextInt(ROOM_CODE_CHARS.length())));
-            }
-            code = sb.toString();
-        } while (rooms.containsKey(code));
-        return code;
+    /**
+     * Drops a room from {@link #rooms} and stops its ticker for good once
+     * {@link GameSession#isRetirable()} - both seats empty, and either the
+     * game genuinely ended or never actually started. Only ever called after
+     * a voluntary {@link #leaveFinishedSessionIfAny} (never after a plain
+     * disconnect - see that method's own Javadoc), so this only fires once
+     * every seat that was ever here has actively moved on to a new game,
+     * never while a merely-disconnected player might still come back.
+     * Without this, every room anyone ever actually finished and left
+     * (including one a lone player abandoned before an opponent ever joined)
+     * would keep its GameSession - and, once a second player had seated, its
+     * still-running per-room ticker thread - alive in memory for the entire
+     * lifetime of the server process.
+     */
+    private void retireIfDone(GameSession session) {
+        if (!session.isRetirable()) return;
+        if (rooms.remove(session.getRoomCode(), session)) {
+            session.shutdown();
+            activityLog.log("room=" + session.getRoomCode() + " retired (finished and empty)");
+        }
+    }
+
+    /**
+     * Generates a fresh room code that's unique both locally (this shard's
+     * own {@link #rooms}) and cluster-wide (via {@link #roomDirectory} -
+     * skipped in the single-shard/local topology, where {@code shardId} is
+     * null and the local check above is the whole story). Retries with a
+     * new random code on any collision instead of ever silently reusing one
+     * another shard - or this one - already claimed:
+     * {@code RoomDirectory.recordIfAbsent} is an atomic claim (backed by
+     * Redis's own {@code SET NX} in the distributed topology), not a
+     * separate check-then-act, so two shards racing to mint the same code at
+     * the same time can never both believe they own it.
+     */
+    private String reserveRoomCode() {
+        while (true) {
+            String code = randomRoomCode();
+            if (rooms.containsKey(code)) continue;
+            if (shardId == null || roomDirectory.recordIfAbsent(code, shardId)) return code;
+        }
+    }
+
+    private String randomRoomCode() {
+        StringBuilder sb = new StringBuilder(ROOM_CODE_LENGTH);
+        for (int i = 0; i < ROOM_CODE_LENGTH; i++) {
+            sb.append(ROOM_CODE_CHARS.charAt(random.nextInt(ROOM_CODE_CHARS.length())));
+        }
+        return sb.toString();
     }
 }

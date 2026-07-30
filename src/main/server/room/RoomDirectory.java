@@ -13,7 +13,14 @@ import java.util.Optional;
  * (Docker Compose) topology.
  */
 public interface RoomDirectory {
-    void record(String roomCode, String shardId);
+    /**
+     * Atomically claims roomCode for shardId - returns false if roomCode is
+     * already claimed (by this shard or any other) instead of silently
+     * overwriting whoever claimed it first, so a caller minting a brand-new
+     * code (see Lobby.reserveRoomCode) can detect a genuine cluster-wide
+     * collision and simply try a different code.
+     */
+    boolean recordIfAbsent(String roomCode, String shardId);
 
     Optional<String> shardFor(String roomCode);
 }

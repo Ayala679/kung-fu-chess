@@ -9,8 +9,8 @@ public class InMemoryRoomDirectory implements RoomDirectory {
     private final Map<String, String> shardIdByRoomCode = new ConcurrentHashMap<>();
 
     @Override
-    public void record(String roomCode, String shardId) {
-        shardIdByRoomCode.put(roomCode, shardId);
+    public boolean recordIfAbsent(String roomCode, String shardId) {
+        return shardIdByRoomCode.putIfAbsent(roomCode, shardId) == null;
     }
 
     @Override

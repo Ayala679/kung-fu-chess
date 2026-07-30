@@ -50,13 +50,26 @@ public class NetworkGuiMain {
 
         System.out.println("Authenticated (rating " + client.getRating() + ")");
 
+        playOneGame(client);
+    }
+
+    /**
+     * Runs the Quick Play/Room chooser through to an open BoardWindow, once
+     * per game. BoardWindow's "New Game" button (only shown for networked
+     * play - see its own constructor) calls back into
+     * {@link #startNewGame(NetworkGameClient)} once the finished window is
+     * disposed, which resets the client's per-game state and runs this same
+     * method again - so clicking it always lands back on this exact chooser,
+     * not a same-opponent rematch.
+     */
+    private static void playOneGame(NetworkGameClient client) throws Exception {
         while (true) {
             try {
                 LobbyDialog.chooseAndWait(client);
                 break;
             } catch (IllegalStateException e) {
                 if ("cancelled".equals(e.getMessage())) {
-                    return;
+                    System.exit(0); // no prior game window left to fall back to
                 }
                 LoginDialog.showError(e.getMessage());
                 // loop back to the Quick Play / Room choice
@@ -70,7 +83,17 @@ public class NetworkGuiMain {
         showCountdown();
 
         ImgRenderer renderer = new ImgRenderer("resources/board.png");
-        new BoardWindow(client, renderer).show(client.getRoomCode());
+        new BoardWindow(client, renderer, () -> startNewGame(client)).show(client.getRoomCode());
+    }
+
+    private static void startNewGame(NetworkGameClient client) {
+        client.resetForNewGame();
+        try {
+            playOneGame(client);
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.exit(1);
+        }
     }
 
     /** Purely cosmetic, client-side-only pre-game countdown - no protocol/server involvement. */

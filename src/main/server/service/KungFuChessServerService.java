@@ -6,13 +6,14 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import org.java_websocket.WebSocket;
 
 import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
-import io.nats.client.Message;
 import io.nats.client.Nats;
 
 import bus.Bus;
@@ -88,6 +89,16 @@ public class KungFuChessServerService {
     private final SessionTokenStore sessionTokenStore;
     private final Map<WebSocket, String> usernames = new ConcurrentHashMap<>();
     private final Map<WebSocket, Integer> ratings = new ConcurrentHashMap<>();
+    // Enforces one live connection per account, across both topologies: without
+    // this, nothing stops the same username from attaching a second time from a
+    // different tab/device and getting seated in a second, simultaneous game -
+    // which corrupts ReconnectRegistry's own username -> single roomCode mapping,
+    // and lets two GameSessions apply a rating change for the same player around
+    // the same time (UserRepository.updateRating is an unconditional overwrite,
+    // not an atomic increment - see GameSession.attemptRematch's own Javadoc on
+    // the same underlying issue), each computed from its own already-stale
+    // in-memory rating, silently losing whichever update lands first.
+    private final Map<String, WebSocket> activeConnectionByUsername = new ConcurrentHashMap<>();
 
     // Embedded topology only (all null in distributed mode).
     private final Bus bus;
@@ -251,7 +262,7 @@ public class KungFuChessServerService {
      *
      * Before either "play" or "join_room" is allowed through, if {@link
      * #shardOf} already points at a shard for this connection, that shard is
-     * asked (see {@link #requestCheckout}) whether it's safe to start a
+     * asked (see {@link #requestCheckoutAsync}) whether it's safe to start a
      * brand-new game. Without this, nothing here stops a connection that's
      * still actively seated in a live game on shard A from sending "play"/
      * "join_room" and getting seated a second time on shard B - shard A has
@@ -262,6 +273,14 @@ public class KungFuChessServerService {
      * in-process before ever reaching this dispatch); this is the same
      * invariant, enforced across the distributed topology's process
      * boundary instead.
+     *
+     * The checkout round trip is asynchronous - never blocks the calling
+     * thread - because Java-WebSocket processes onMessage callbacks from a
+     * small, fixed pool of worker threads shared across every connected
+     * client, not one thread per connection; blocking one of those for up to
+     * {@link #CHECKOUT_TIMEOUT} while a shard is slow or down would stall
+     * message processing for other players too, not just the one who sent
+     * "play"/"join_room".
      */
     private void routeDistributedCommand(WebSocket conn, String message) {
         String[] parts = message.trim().split("\\s+", 2);
@@ -271,14 +290,25 @@ public class KungFuChessServerService {
         if (verb.equals(Protocol.PLAY) || verb.equals(Protocol.JOIN_ROOM)) {
             String currentShard = shardOf.get(conn);
             if (currentShard != null) {
-                if (!requestCheckout(currentShard, connectionIds.get(conn))) {
-                    conn.send(Protocol.ERROR + "|ALREADY_IN_A_GAME");
-                    return;
-                }
-                shardOf.remove(conn);
+                requestCheckoutAsync(currentShard, connectionIds.get(conn)).thenAccept(canLeave -> {
+                    if (!canLeave) {
+                        if (conn.isOpen()) conn.send(Protocol.ERROR + "|ALREADY_IN_A_GAME");
+                        return;
+                    }
+                    shardOf.remove(conn);
+                    dispatchPostCheckout(conn, verb, parts, envelope);
+                });
+                return;
             }
         }
 
+        dispatchPostCheckout(conn, verb, parts, envelope);
+    }
+
+    // The rest of routeDistributedCommand's dispatch decision, factored out so it can run either
+    // immediately (no shard currently associated with this connection) or once an async checkout
+    // resolves successfully (see routeDistributedCommand).
+    private void dispatchPostCheckout(WebSocket conn, String verb, String[] parts, String envelope) {
         if (verb.equals(Protocol.PLAY)) {
             gatewayNatsConnection.publish("matchmaker.play", envelope.getBytes(StandardCharsets.UTF_8));
             return;
@@ -310,7 +340,7 @@ public class KungFuChessServerService {
     }
 
     /**
-     * Blocking NATS request-reply asking {@code shardId} whether {@code
+     * Asynchronous NATS request-reply asking {@code shardId} whether {@code
      * connectionId} may start a brand-new game (see
      * GameServerShardService#checkoutForNewGame) - true if it has no session
      * there at all, or only a finished one (left as a side effect); false if
@@ -318,20 +348,16 @@ public class KungFuChessServerService {
      * reply within {@link #CHECKOUT_TIMEOUT}) is treated as "still busy" -
      * refusing the new game request is the safe failure mode here, since the
      * alternative (assuming it's fine) risks the exact duplicate-seat
-     * problem this check exists to prevent.
+     * problem this check exists to prevent. Never blocks the calling thread -
+     * see this method's caller, {@link #routeDistributedCommand}, for why.
      */
-    private boolean requestCheckout(String shardId, String connectionId) {
-        try {
-            Message reply = gatewayNatsConnection.request(
-                    GameServerShardController.checkoutSubject(shardId),
-                    connectionId.getBytes(StandardCharsets.UTF_8),
-                    CHECKOUT_TIMEOUT);
-            if (reply == null) return false;
-            return "1".equals(new String(reply.getData(), StandardCharsets.UTF_8));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
+    private CompletableFuture<Boolean> requestCheckoutAsync(String shardId, String connectionId) {
+        return gatewayNatsConnection.request(
+                        GameServerShardController.checkoutSubject(shardId),
+                        connectionId.getBytes(StandardCharsets.UTF_8))
+                .orTimeout(CHECKOUT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                .handle((reply, error) -> error == null && reply != null
+                        && "1".equals(new String(reply.getData(), StandardCharsets.UTF_8)));
     }
 
     // Parses "attach <token>" (token minted by the REST login/register endpoints, see HttpApiServer/ApiGateway), replies AUTH_OK/ERROR. Always handled locally (SessionTokenStore is directly reachable in both topologies) - only what happens on success (a reconnect attempt) differs by topology.
@@ -351,6 +377,12 @@ public class KungFuChessServerService {
         }
 
         String username = principal.get().username();
+        WebSocket existing = activeConnectionByUsername.putIfAbsent(username, conn);
+        if (existing != null && existing != conn) {
+            conn.send(Protocol.ERROR + "|already connected elsewhere");
+            conn.close();
+            return;
+        }
         usernames.put(conn, username);
         ratings.put(conn, principal.get().rating());
         conn.send(Protocol.AUTH_OK + "|" + principal.get().rating());
@@ -399,7 +431,8 @@ public class KungFuChessServerService {
 
     public void handleClose(WebSocket conn, String reason) {
         activityLog.log("connection closed: " + conn.getRemoteSocketAddress() + " (" + reason + ")");
-        usernames.remove(conn);
+        String username = usernames.remove(conn);
+        if (username != null) activeConnectionByUsername.remove(username, conn);
         ratings.remove(conn);
 
         if (distributed) {

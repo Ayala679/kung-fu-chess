@@ -94,6 +94,9 @@ public class UserRepository {
      * it out as a raw {@code IllegalStateException}.
      */
     public AuthResult register(String username, String password) {
+        if (!isSupportedUsername(username)) {
+            return AuthResult.failure("username contains an unsupported character");
+        }
         try (Connection conn = connect()) {
             if (findRating(conn, username) != null) {
                 return AuthResult.failure("username taken");
@@ -125,6 +128,16 @@ public class UserRepository {
         return sqlState != null && sqlState.startsWith("23");
     }
 
+    // "|" is the field delimiter GatewayCommandEnvelope/SeatPairEnvelope use to ship a username
+    // across the distributed topology's NATS messages (server.GatewayCommandEnvelope/SeatPairEnvelope) -
+    // a username containing one would silently split into the wrong fields on the receiving end
+    // (e.g. corrupting the rating field), decode-failing that command in the Game Server Shard's own
+    // try/catch with no reply ever reaching the client. Rejected at registration time, the only place
+    // a username is ever minted, so this can never happen later regardless of topology.
+    private static boolean isSupportedUsername(String username) {
+        return !username.isEmpty() && username.indexOf('|') < 0;
+    }
+
     // Looks up the stored salt/hash and checks the password via PasswordHasher.matches.
     public AuthResult authenticate(String username, String password) {
         try (Connection conn = connect();
@@ -143,6 +156,24 @@ public class UserRepository {
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Authentication failed for " + username, e);
+        }
+    }
+
+    /**
+     * The current, up-to-date rating for username, or fallback if the
+     * account can't be found (shouldn't normally happen mid-game). Lets a
+     * caller holding an older cached rating (see GameSession's own
+     * whiteRating/blackRating - captured once at seat time) re-sync with
+     * whatever the database actually has now, e.g. before scoring a rematch
+     * that follows an already-applied rating change from the prior game in
+     * the same room.
+     */
+    public int currentRating(String username, int fallback) {
+        try (Connection conn = connect()) {
+            Integer rating = findRating(conn, username);
+            return rating != null ? rating : fallback;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Rating lookup failed for " + username, e);
         }
     }
 

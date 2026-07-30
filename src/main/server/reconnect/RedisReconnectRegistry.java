@@ -8,7 +8,7 @@ import redis.clients.jedis.Jedis;
  * Redis-backed {@link ReconnectRegistry} - what the Docker Compose
  * deployment uses (KFC_REDIS_URL set). One connection per call, matching
  * RedisSessionTokenStore/UserRepository's own simplicity choice. Room codes
- * are already constrained to {@code [A-Z0-9]{6}} (see Lobby.newRoomCode),
+ * are already constrained to {@code [A-Z0-9]{6}} (see Lobby.reserveRoomCode),
  * so a plain string value is safe - no delimiter/encoding concerns.
  */
 public class RedisReconnectRegistry implements ReconnectRegistry {

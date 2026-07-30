@@ -123,6 +123,7 @@ public class GameSession {
     private GameEngine engine;
     private final RatingService ratingService;
     private final GameResultRepository gameResultRepository;
+    private final UserRepository userRepository;
     private final ActivityLog activityLog;
     private final long disconnectGraceMillis;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -144,6 +145,7 @@ public class GameSession {
     private int whiteRating;
     private int blackRating;
     private boolean ratingApplied = false;
+    private boolean gameStarted = false;
     private ScheduledFuture<?> whiteAbandonTask;
     private ScheduledFuture<?> blackAbandonTask;
 
@@ -164,6 +166,7 @@ public class GameSession {
         this.snapshotTopic = "room." + roomCode + ".snapshot";
         this.ratingService = new RatingService(userRepository);
         this.gameResultRepository = GameResultRepository.forJdbcUrl(userRepository.getJdbcUrl());
+        this.userRepository = userRepository;
         this.activityLog = activityLog;
         this.disconnectGraceMillis = disconnectGraceMillis;
         this.engine = newStandardGameEngine();
@@ -220,6 +223,7 @@ public class GameSession {
                 blackRating = rating;
                 engine.setPlayerNames(whiteUsername, blackUsername);
                 whiteConn = whiteConnection;
+                gameStarted = true;
                 assigned = Seat.BLACK;
             } else {
                 viewers.add(connection);
@@ -273,6 +277,31 @@ public class GameSession {
         synchronized (lock) {
             return engine.isGameOver();
         }
+    }
+
+    /**
+     * True once this room can never do anything more: both seats are
+     * currently unoccupied, and either the game is genuinely over or it
+     * never actually started (a lone seated player who left before an
+     * opponent ever joined). Used by Lobby to retire a room - stop its
+     * ticker (see {@link #shutdown()}) and drop it from the room table -
+     * instead of leaking one live thread and one map entry per room ever
+     * played for the lifetime of the process. Deliberately false while both
+     * seats are empty but the game *hasn't* ended yet (e.g. both players
+     * disconnected mid-game and the auto-abandon timer hasn't fired) - the
+     * room must stay alive so reconnection and the pending abandon still
+     * work.
+     */
+    public boolean isRetirable() {
+        synchronized (lock) {
+            if (whiteConnection != null || blackConnection != null) return false;
+            return !gameStarted || engine.isGameOver();
+        }
+    }
+
+    /** Stops this room's ticker for good - called once by Lobby exactly when {@link #isRetirable()} turns true. Safe to call even if the ticker never actually started. */
+    public void shutdown() {
+        scheduler.shutdown();
     }
 
     private void startTicker() {
@@ -427,16 +456,43 @@ public class GameSession {
     /**
      * Replaces engine with a fresh standard board, if the current game is
      * actually over and neither seat is currently vacated by a disconnect -
-     * the paused check and the engine swap happen inside one lock
-     * acquisition so a disconnect landing in between can't sneak a rematch
-     * through against a defenseless opponent.
+     * the paused/game-over check and the engine swap happen inside one lock
+     * acquisition each (with the rating re-fetch in between - see below) so
+     * a disconnect landing in between can't sneak a rematch through against
+     * a defenseless opponent.
+     *
+     * whiteRating/blackRating are re-read from the database in between the
+     * two checks, before actually committing to the rematch: they're a
+     * point-in-time cache taken once at {@link #join}, and the previous
+     * game's rating change already landed in the database by now (applyRatingChangeIfGameJustEnded
+     * runs synchronously inside the very broadcastSnapshot() call that first
+     * reported gameOver()) - without this re-fetch, every game after the
+     * first one in the same room would score ELO against an increasingly
+     * stale baseline and silently overwrite the database with the wrong
+     * numbers (see UserRepository.updateRating - an unconditional SET, not
+     * an increment). Done outside the lock since it's a blocking DB call,
+     * matching applyRatingChangeIfGameJustEnded's own reasoning for keeping
+     * slow I/O off this room's lock.
      */
     private RematchOutcome attemptRematch() {
+        String whiteUser, blackUser;
+        synchronized (lock) {
+            if (isPausedForDisconnect()) return RematchOutcome.PAUSED;
+            if (!engine.isGameOver()) return RematchOutcome.NOT_OVER;
+            whiteUser = whiteUsername;
+            blackUser = blackUsername;
+        }
+
+        int freshWhiteRating = userRepository.currentRating(whiteUser, whiteRating);
+        int freshBlackRating = userRepository.currentRating(blackUser, blackRating);
+
         synchronized (lock) {
             if (isPausedForDisconnect()) return RematchOutcome.PAUSED;
             if (!engine.isGameOver()) return RematchOutcome.NOT_OVER;
             engine = newStandardGameEngine();
             engine.setPlayerNames(whiteUsername, blackUsername);
+            whiteRating = freshWhiteRating;
+            blackRating = freshBlackRating;
             whiteSelection = null;
             blackSelection = null;
             pendingActions.clear();
@@ -632,6 +688,28 @@ public class GameSession {
      * removed from the broadcast list (no reconnection concept for
      * spectators - rejoining the room via a fresh join_room is enough).
      */
+    /**
+     * Vacates connection's seat because it's voluntarily leaving an already-
+     * finished game to start a new one elsewhere (see
+     * Lobby.leaveFinishedSessionIfAny / GameServerShardService.checkoutForNewGame) -
+     * deliberately NOT the same path as {@link #handleDisconnect}: this game
+     * already ended with its real, correct result, so unlike a genuine
+     * disconnect this must not schedule an auto-abandon (a stray abandon
+     * firing later would be a no-op now anyway - see {@link
+     * #scheduleAutoAbandon} - but there's no reason to schedule one at all)
+     * or tell the other side/viewers a disconnect just happened, which
+     * would be a false alarm for a departure that was never involuntary.
+     * Whoever remains can never complete a rematch here afterward (there is
+     * nobody left to rematch against), which is correct, not a bug.
+     */
+    public void leaveAfterGameOver(OutboundConnection connection) {
+        synchronized (lock) {
+            if (connection == whiteConnection) whiteConnection = null;
+            else if (connection == blackConnection) blackConnection = null;
+            else viewers.remove(connection);
+        }
+    }
+
     public void handleDisconnect(OutboundConnection connection) {
         Piece.Color disconnectedColor = null;
         synchronized (lock) {
@@ -733,11 +811,22 @@ public class GameSession {
                 + disconnectGraceMillis + "ms if not reconnected");
         return scheduler.schedule(() -> {
             try {
+                // The game may have already ended for real (a legitimate king
+                // capture/resignation) in the disconnectGraceMillis window between
+                // this task being scheduled and it actually firing - GameState.abandon()
+                // unconditionally overwrites winner with null, so calling it here
+                // unconditionally would silently erase a genuine, already-decided
+                // result the instant this stale timer goes off. Only ever abandon a
+                // game that is still actually in progress.
+                boolean abandonedNow;
                 synchronized (lock) {
-                    engine.abandon();
+                    abandonedNow = !engine.isGameOver();
+                    if (abandonedNow) engine.abandon();
                 }
-                activityLog.log("room=" + roomCode + " game abandoned (disconnect timeout, no winner, no rating change)");
-                broadcastSnapshot();
+                if (abandonedNow) {
+                    activityLog.log("room=" + roomCode + " game abandoned (disconnect timeout, no winner, no rating change)");
+                    broadcastSnapshot();
+                }
             } catch (RuntimeException e) {
                 activityLog.log("room=" + roomCode + " auto-abandon task failed unexpectedly: " + e);
             }
@@ -746,8 +835,19 @@ public class GameSession {
 
     // Sends a fresh STATE to White, Black and every viewer; also publishes to bus and calls applyRatingChangeIfGameJustEnded.
     private void broadcastSnapshot() {
-        GameSnapshot whiteView = buildSnapshotFor(Piece.Color.WHITE);
-        GameSnapshot blackView = buildSnapshotFor(Piece.Color.BLACK);
+        // All three views are built inside one lock acquisition (not one
+        // buildSnapshotFor/buildNeutralSnapshot call each, separately locked) so
+        // they describe the exact same instant of engine state - otherwise the
+        // ticker or a concurrently-handled click/jump could mutate the engine in
+        // between two separate lock acquisitions, and White/Black/viewers could
+        // each end up seeing a snapshot from a subtly different moment.
+        GameSnapshot whiteView, blackView, neutralView;
+        synchronized (lock) {
+            whiteView = engine.buildSnapshot(getSelection(Piece.Color.WHITE));
+            blackView = engine.buildSnapshot(getSelection(Piece.Color.BLACK));
+            neutralView = viewers.isEmpty() ? null : engine.buildSnapshot(null);
+        }
+
         String whiteMessage = encode(whiteView);
         OutboundConnection white, black;
         synchronized (lock) {
@@ -757,8 +857,8 @@ public class GameSession {
         send(white, whiteMessage);
         send(black, encode(blackView));
 
-        if (!viewers.isEmpty()) {
-            String neutralMessage = encode(buildNeutralSnapshot());
+        if (neutralView != null) {
+            String neutralMessage = encode(neutralView);
             for (OutboundConnection viewer : viewers) send(viewer, neutralMessage);
         }
 

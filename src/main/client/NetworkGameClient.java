@@ -49,7 +49,7 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
 
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final CountDownLatch authComplete = new CountDownLatch(1);
-    private final CountDownLatch firstSnapshot = new CountDownLatch(1);
+    private volatile CountDownLatch firstSnapshot = new CountDownLatch(1);
     private volatile int rating;
     private volatile String sessionToken;
     private volatile String serverError;
@@ -161,6 +161,26 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         if (!firstSnapshot.await(timeoutSeconds, TimeUnit.SECONDS)) {
             throw new IllegalStateException("Server did not send an initial board state");
         }
+    }
+
+    /**
+     * Clears this connection's per-game state so it can go through
+     * {@link LobbyDialog#chooseAndWait}/{@link #awaitFirstSnapshot} again for
+     * a brand-new game (view.BoardWindow's "New Game" button, once the
+     * current game is over) - the connection itself, its auth, and its
+     * session token all stay put. Sending "play"/"join_room" again on an
+     * already-attached connection that's sitting in a finished session is
+     * already handled server-side (see server.service.KungFuChessServerService.
+     * doHandleMessage's isLobbyCommand check, which leaves the finished
+     * session first via Lobby.leaveFinishedSessionIfAny), so no explicit
+     * "leave" message is needed here.
+     */
+    public void resetForNewGame() {
+        assignedSeat = null;
+        roomCode = null;
+        latestSnapshot = null;
+        opponentAbandonDeadline = 0;
+        firstSnapshot = new CountDownLatch(1);
     }
 
     public int getRating() {

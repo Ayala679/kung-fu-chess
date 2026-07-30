@@ -1,6 +1,8 @@
 package server.controller;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
@@ -35,17 +37,43 @@ import server.service.GameServerShardService;
  * matches.
  */
 public class GameServerShardController {
+    // "shard.<id>.command" is the one truly high-volume subject here - a message
+    // per click/jump/rematch across every game this shard hosts - so handling it
+    // inline on the single NATS Dispatcher thread (shared with every other subject
+    // below) would mean every room's commands queue up behind one another with zero
+    // real parallelism, unlike the local/offline topology where each WebSocket
+    // connection already gets its own thread. Commands are hashed by connectionId
+    // across a small fixed pool of single-threaded executors instead: this bounds
+    // concurrency to COMMAND_WORKER_COUNT while still guaranteeing every command
+    // from the same connection is processed in the order it arrived (a given
+    // connectionId always lands on the same executor). Every other subject here is
+    // low-volume (one message per join/disconnect/room-creation, not per click) and
+    // stays on the main dispatcher thread.
+    private static final int COMMAND_WORKER_COUNT = Math.max(4, Runtime.getRuntime().availableProcessors());
+
     private final Dispatcher dispatcher;
     private final ActivityLog activityLog;
     private final String shardId;
     private final GameServerShardService service;
+    private final ExecutorService[] commandWorkers = new ExecutorService[COMMAND_WORKER_COUNT];
 
     public GameServerShardController(Connection natsConnection, GameServerShardService service, String shardId, ActivityLog activityLog) {
         this.activityLog = activityLog;
         this.shardId = shardId;
         this.service = service;
+        for (int i = 0; i < commandWorkers.length; i++) {
+            int workerIndex = i;
+            commandWorkers[i] = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "shard-" + shardId + "-command-worker-" + workerIndex);
+                t.setDaemon(true);
+                return t;
+            });
+        }
         this.dispatcher = natsConnection.createDispatcher();
-        dispatcher.subscribe("shard." + shardId + ".command", msg -> handleCommand(new String(msg.getData(), StandardCharsets.UTF_8)));
+        dispatcher.subscribe("shard." + shardId + ".command", msg -> {
+            String encoded = new String(msg.getData(), StandardCharsets.UTF_8);
+            commandWorkerFor(encoded).submit(() -> handleCommand(encoded));
+        });
         dispatcher.subscribe("gateway.reconnect", msg -> handleReconnect(new String(msg.getData(), StandardCharsets.UTF_8)));
         dispatcher.subscribe("gateway.disconnect", msg -> handleDisconnect(new String(msg.getData(), StandardCharsets.UTF_8)));
         dispatcher.subscribe("shard." + shardId + ".seat_pair", msg -> handleSeatPair(new String(msg.getData(), StandardCharsets.UTF_8)));
@@ -76,6 +104,14 @@ public class GameServerShardController {
             // least makes that failure diagnosable instead of silent.
             activityLog.log("load query failed unexpectedly: " + e);
         }
+    }
+
+    // Picks this connectionId's dedicated worker (see COMMAND_WORKER_COUNT's own
+    // comment) without fully decoding the envelope twice - just the first field.
+    private ExecutorService commandWorkerFor(String encoded) {
+        String connectionId = encoded.split("\\|", 2)[0];
+        int index = Math.floorMod(connectionId.hashCode(), commandWorkers.length);
+        return commandWorkers[index];
     }
 
     private void handleCommand(String encoded) {
@@ -147,5 +183,6 @@ public class GameServerShardController {
         dispatcher.unsubscribe(RemoteRoomCreator.subjectFor(shardId));
         dispatcher.unsubscribe(loadSubject(shardId));
         dispatcher.unsubscribe(checkoutSubject(shardId));
+        for (ExecutorService worker : commandWorkers) worker.shutdown();
     }
 }

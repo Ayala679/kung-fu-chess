@@ -235,15 +235,6 @@ public class ImgRenderer {
         int y = canvasHeight / 2;
 
         frame.putText(message, x, y, fontSize, new Color(255, 215, 0), 0);
-
-        // Rematch (BoardWindow's 'R' key listener) has no other on-screen
-        // affordance at all otherwise - without this line there was no way
-        // to discover the feature exists short of already knowing about it.
-        String hint = "Press R for a rematch";
-        float hintFontSize = 1.6f;
-        int approxHintWidth = (int) (hint.length() * hintFontSize * 12 * 0.55);
-        int hintX = (canvasWidth - approxHintWidth) / 2;
-        frame.putText(hint, hintX, y + 40, hintFontSize, new Color(255, 215, 0), 0);
     }
 
     /**

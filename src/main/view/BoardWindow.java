@@ -1,13 +1,13 @@
 package view;
 
+import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Rectangle;
-import java.awt.event.KeyAdapter;
-import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
+import javax.swing.JButton;
 import javax.swing.JFrame;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
@@ -30,13 +30,27 @@ public class BoardWindow {
     private final GameClient eventEngine;
     private final ImgRenderer renderer;
     private final JPanel panel;
+    private final JButton newGameButton;
+    private final Runnable onNewGame;
     private final int boardWidthPx;
     private final int boardHeightPx;
     private volatile BufferedImage currentFrame;
+    private JFrame windowFrame;
 
     public BoardWindow(GameClient eventEngine, ImgRenderer renderer) {
+        this(eventEngine, renderer, null);
+    }
+
+    /**
+     * @param onNewGame called (on the EDT, after this window's own frame is
+     *     disposed) when the "New Game" button is clicked - only shown at
+     *     all once the game is over, and only if this is non-null (offline
+     *     play, via the other constructor, has no lobby to return to).
+     */
+    public BoardWindow(GameClient eventEngine, ImgRenderer renderer, Runnable onNewGame) {
         this.eventEngine = eventEngine;
         this.renderer = renderer;
+        this.onNewGame = onNewGame;
         this.boardWidthPx = renderer.getBoardWidthPx();
         this.boardHeightPx = renderer.getBoardHeightPx();
         this.currentFrame = renderer.render(eventEngine.snapshot()).get();
@@ -88,14 +102,17 @@ public class BoardWindow {
             }
         });
 
-        // 'R' once the game is over requests a rematch - a no-op in offline play (see GameClient.requestRematch()).
-        panel.setFocusable(true);
-        panel.addKeyListener(new KeyAdapter() {
-            @Override
-            public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_R && eventEngine.snapshot().gameOver()) {
-                    eventEngine.requestRematch();
-                }
+        // Enabled only once the game is over (toggled in refresh()); clicking
+        // it tears down this window and hands control back to whoever built
+        // it (NetworkGuiMain), which returns to the Quick Play/Room chooser
+        // rather than silently re-challenging the same opponent - see
+        // client.NetworkGameClient.resetForNewGame().
+        newGameButton = new JButton("New Game");
+        newGameButton.setEnabled(false);
+        newGameButton.addActionListener(e -> {
+            if (onNewGame != null) {
+                windowFrame.dispose();
+                onNewGame.run();
             }
         });
 
@@ -113,6 +130,9 @@ public class BoardWindow {
         }
         currentFrame = frame.get();
         panel.repaint();
+        if (onNewGame != null) {
+            newGameButton.setEnabled(eventEngine.snapshot().gameOver());
+        }
     }
 
     /** The largest rectangle of currentFrame's own aspect ratio that fits within (availableWidth, availableHeight), centered - so the board/tables scale evenly instead of stretching into an arbitrary window shape. */
@@ -138,12 +158,20 @@ public class BoardWindow {
 
     /** Same as {@link #show()}, but with a subtitle (e.g. a room code) appended to the window title. */
     public void show(String subtitle) {
-        JFrame frame = new JFrame(subtitle == null || subtitle.isEmpty() ? "Kung Fu Chess" : "Kung Fu Chess - " + subtitle);
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.add(panel);
-        frame.pack();
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
-        panel.requestFocusInWindow(); // so the 'R' (rematch) key listener actually receives key events
+        windowFrame = new JFrame(subtitle == null || subtitle.isEmpty() ? "Kung Fu Chess" : "Kung Fu Chess - " + subtitle);
+        windowFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        if (onNewGame != null) {
+            JPanel root = new JPanel(new BorderLayout());
+            root.add(panel, BorderLayout.CENTER);
+            JPanel southBar = new JPanel();
+            southBar.add(newGameButton);
+            root.add(southBar, BorderLayout.SOUTH);
+            windowFrame.add(root);
+        } else {
+            windowFrame.add(panel);
+        }
+        windowFrame.pack();
+        windowFrame.setLocationRelativeTo(null);
+        windowFrame.setVisible(true);
     }
 }
