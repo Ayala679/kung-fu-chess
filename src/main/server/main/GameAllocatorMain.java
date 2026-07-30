@@ -32,8 +32,9 @@ public class GameAllocatorMain {
             throw new IllegalStateException("Could not connect to NATS at " + natsUrl, e);
         }
 
-        GameAllocatorService service = new GameAllocatorService(natsConnection, shardIds, new ShardPicker(shardIds), new ActivityLog(logPath));
-        GameAllocatorController controller = new GameAllocatorController(natsConnection, service);
+        ActivityLog activityLog = new ActivityLog(logPath);
+        GameAllocatorService service = new GameAllocatorService(natsConnection, shardIds, new ShardPicker(shardIds), activityLog);
+        GameAllocatorController controller = new GameAllocatorController(natsConnection, service, activityLog);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             controller.stop();
             try {

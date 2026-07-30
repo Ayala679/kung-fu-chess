@@ -163,7 +163,7 @@ public class GameSession {
         this.roomCode = roomCode;
         this.snapshotTopic = "room." + roomCode + ".snapshot";
         this.ratingService = new RatingService(userRepository);
-        this.gameResultRepository = new GameResultRepository(userRepository.getJdbcUrl());
+        this.gameResultRepository = GameResultRepository.forJdbcUrl(userRepository.getJdbcUrl());
         this.activityLog = activityLog;
         this.disconnectGraceMillis = disconnectGraceMillis;
         this.engine = newStandardGameEngine();
@@ -179,8 +179,10 @@ public class GameSession {
     }
 
     /** True once both a White and Black player are seated. */
-    public synchronized boolean isFull() {
-        return whiteConnection != null && blackConnection != null;
+    public boolean isFull() {
+        synchronized (lock) {
+            return whiteConnection != null && blackConnection != null;
+        }
     }
 
     /**
@@ -191,30 +193,56 @@ public class GameSession {
      * opponent...". Once Black joins, both are greeted together and the
      * game actually starts; a VIEWER joining an already-running game is
      * greeted immediately.
+     *
+     * All the mutable-state work (which seat, updating engine player names)
+     * happens inside one {@code synchronized(lock)} block, matching every
+     * other entry point that touches {@code whiteConnection}/{@code
+     * blackConnection}/{@code engine} - greeting/logging (network I/O)
+     * happen afterward, outside the lock. If the freshly-seated connection
+     * is already closed (one that raced a real disconnect before it ever
+     * reached this method - see the distributed topology's connectionId
+     * caches), this immediately runs the exact same handling a live
+     * disconnect would, instead of silently treating a dead connection as a
+     * present opponent forever.
      */
-    public synchronized Seat join(OutboundConnection connection, String username, int rating) {
-        if (whiteConnection == null) {
-            whiteConnection = connection;
-            whiteUsername = username;
-            whiteRating = rating;
-            activityLog.log("room=" + roomCode + " " + username + " seated WHITE - waiting for an opponent");
-            return Seat.WHITE;
+    public Seat join(OutboundConnection connection, String username, int rating) {
+        Seat assigned;
+        OutboundConnection whiteConn = null;
+        synchronized (lock) {
+            if (whiteConnection == null) {
+                whiteConnection = connection;
+                whiteUsername = username;
+                whiteRating = rating;
+                assigned = Seat.WHITE;
+            } else if (blackConnection == null) {
+                blackConnection = connection;
+                blackUsername = username;
+                blackRating = rating;
+                engine.setPlayerNames(whiteUsername, blackUsername);
+                whiteConn = whiteConnection;
+                assigned = Seat.BLACK;
+            } else {
+                viewers.add(connection);
+                assigned = Seat.VIEWER;
+            }
         }
-        if (blackConnection == null) {
-            blackConnection = connection;
-            blackUsername = username;
-            blackRating = rating;
-            engine.setPlayerNames(whiteUsername, blackUsername);
+
+        if (assigned == Seat.WHITE) {
+            activityLog.log("room=" + roomCode + " " + username + " seated WHITE - waiting for an opponent");
+        } else if (assigned == Seat.BLACK) {
             startTicker();
             activityLog.log("room=" + roomCode + " " + username + " seated BLACK - game starting");
-            greet(whiteConnection, Seat.WHITE);
-            greet(blackConnection, Seat.BLACK);
-            return Seat.BLACK;
+            greet(whiteConn, Seat.WHITE);
+            greet(connection, Seat.BLACK);
+        } else {
+            activityLog.log("room=" + roomCode + " " + username + " joined as VIEWER");
+            greet(connection, Seat.VIEWER);
         }
-        viewers.add(connection);
-        activityLog.log("room=" + roomCode + " " + username + " joined as VIEWER");
-        greet(connection, Seat.VIEWER);
-        return Seat.VIEWER;
+
+        if (assigned.isPlayer() && !connection.isOpen()) {
+            handleDisconnect(connection);
+        }
+        return assigned;
     }
 
     // Sends WELCOME + one initial snapshot to a newly-seated connection. Calls buildSnapshotFor/buildNeutralSnapshot.
@@ -225,8 +253,10 @@ public class GameSession {
     }
 
     public Seat seatOf(OutboundConnection connection) {
-        if (connection == whiteConnection) return Seat.WHITE;
-        if (connection == blackConnection) return Seat.BLACK;
+        synchronized (lock) {
+            if (connection == whiteConnection) return Seat.WHITE;
+            if (connection == blackConnection) return Seat.BLACK;
+        }
         if (viewers.contains(connection)) return Seat.VIEWER;
         return null;
     }
@@ -239,8 +269,10 @@ public class GameSession {
      * (see handleDisconnect) and fall through to normal lobby handling
      * instead of being swallowed here as an unrecognized command.
      */
-    public synchronized boolean isGameOver() {
-        return engine.isGameOver();
+    public boolean isGameOver() {
+        synchronized (lock) {
+            return engine.isGameOver();
+        }
     }
 
     private void startTicker() {
@@ -313,29 +345,40 @@ public class GameSession {
             send(connection, Protocol.ERROR + "|" + ERROR_VIEWER_CANNOT_PLAY);
             return;
         }
-        if (isPausedForDisconnect()) {
-            send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
-            return;
-        }
         Piece.Color color = seat.toColor();
 
+        // The disconnect/pause check happens inside handleClick/handleJump
+        // themselves, atomically with the actual engine access (same lock,
+        // same critical section) - checking it here first and acting on it
+        // separately below would leave a window where a disconnect lands in
+        // between the check and the action.
         boolean actionTaken;
         if (parts[0].equals("click")) {
-            ClickSelector.Outcome outcome = handleClick(color, row, col);
-            if (outcome == ClickSelector.Outcome.MOVE_REJECTED) {
+            ClickAttempt attempt = handleClick(color, row, col);
+            if (attempt.paused) {
+                send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
+                actionTaken = false;
+            } else if (attempt.outcome == ClickSelector.Outcome.MOVE_REJECTED) {
                 send(connection, Protocol.ERROR + "|" + ERROR_ILLEGAL_MOVE);
                 actionTaken = false;
             } else {
                 send(connection, Protocol.COMMAND_RESULT + "|SUCCESS");
+                if (attempt.outcome == ClickSelector.Outcome.MOVE_ACCEPTED) {
+                    broadcastEvent("MOVE_ACCEPTED", color, attempt.from, attempt.to);
+                }
                 actionTaken = true;
             }
         } else {
-            boolean owns = handleJump(color, row, col);
-            if (!owns) {
+            JumpAttempt attempt = handleJump(color, row, col);
+            if (attempt.paused) {
+                send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
+                actionTaken = false;
+            } else if (!attempt.owns) {
                 send(connection, Protocol.ERROR + "|" + ERROR_NOT_YOUR_PIECE);
                 actionTaken = false;
             } else {
                 send(connection, Protocol.COMMAND_RESULT + "|SUCCESS"); // owning the piece is all that's required - the jump always actually starts, see GameEngine.requestJump
+                if (attempt.started) broadcastEvent("JUMP_ACCEPTED", color, attempt.pos, null);
                 actionTaken = true;
             }
         }
@@ -367,80 +410,132 @@ public class GameSession {
             send(connection, Protocol.ERROR + "|" + ERROR_VIEWER_CANNOT_PLAY);
             return;
         }
-        if (isPausedForDisconnect()) {
-            send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
-            return;
+        RematchOutcome outcome = attemptRematch();
+        switch (outcome) {
+            case PAUSED -> send(connection, Protocol.ERROR + "|" + ERROR_GAME_PAUSED);
+            case NOT_OVER -> send(connection, Protocol.ERROR + "|" + ERROR_GAME_NOT_OVER);
+            case SUCCESS -> {
+                send(connection, Protocol.COMMAND_RESULT + "|SUCCESS");
+                activityLog.log("room=" + roomCode + " rematch requested by " + seat);
+                broadcastSnapshot();
+            }
         }
-        if (!requestRematch()) {
-            send(connection, Protocol.ERROR + "|" + ERROR_GAME_NOT_OVER);
-            return;
-        }
-        send(connection, Protocol.COMMAND_RESULT + "|SUCCESS");
-        activityLog.log("room=" + roomCode + " rematch requested by " + seat);
-        broadcastSnapshot();
     }
 
-    /** Replaces engine with a fresh standard board, if the current game is actually over. Returns false otherwise. */
-    private boolean requestRematch() {
+    private enum RematchOutcome { SUCCESS, PAUSED, NOT_OVER }
+
+    /**
+     * Replaces engine with a fresh standard board, if the current game is
+     * actually over and neither seat is currently vacated by a disconnect -
+     * the paused check and the engine swap happen inside one lock
+     * acquisition so a disconnect landing in between can't sneak a rematch
+     * through against a defenseless opponent.
+     */
+    private RematchOutcome attemptRematch() {
         synchronized (lock) {
-            if (!engine.isGameOver()) return false;
+            if (isPausedForDisconnect()) return RematchOutcome.PAUSED;
+            if (!engine.isGameOver()) return RematchOutcome.NOT_OVER;
             engine = newStandardGameEngine();
             engine.setPlayerNames(whiteUsername, blackUsername);
             whiteSelection = null;
             blackSelection = null;
             pendingActions.clear();
             ratingApplied = false;
-            return true;
+            return RematchOutcome.SUCCESS;
         }
     }
 
-    /** True once both seats are filled with real players and one of them is currently disconnected - clicks/jumps/rematch are rejected and the clock is frozen until they reconnect or the abandon timer fires. */
+    /**
+     * True once both seats are filled with real players and one of them is
+     * currently disconnected - clicks/jumps/rematch are rejected and the
+     * clock is frozen until they reconnect or the abandon timer fires.
+     * Always called from within a block already synchronized on {@link
+     * #lock} - it reads the same fields every other gate/engine access does.
+     */
     private boolean isPausedForDisconnect() {
         return whiteUsername != null && blackUsername != null
                 && (whiteConnection == null || blackConnection == null);
     }
 
+    /** Result of one click attempt - see {@link #handleClick}. */
+    private static final class ClickAttempt {
+        final boolean paused;
+        final ClickSelector.Outcome outcome;
+        final Position from;
+        final Position to;
+
+        ClickAttempt(boolean paused, ClickSelector.Outcome outcome, Position from, Position to) {
+            this.paused = paused;
+            this.outcome = outcome;
+            this.from = from;
+            this.to = to;
+        }
+    }
+
     /**
      * Same click rules as event.EventEngine, via the shared ClickSelector -
-     * just keyed to this one color's selection. When the click resolved to
-     * an actually-accepted move, records a {@link PendingAction} to watch
-     * and immediately announces {@code EVENT|MOVE_ACCEPTED}.
+     * just keyed to this one color's selection. The pause check, the click
+     * itself, and recording a {@link PendingAction} for an accepted move all
+     * happen inside one {@code synchronized(lock)} block, so a disconnect
+     * can't land in the middle of processing a click that was already judged
+     * to be allowed. {@code EVENT|MOVE_ACCEPTED} is broadcast by the caller,
+     * after the lock is released.
      */
-    private ClickSelector.Outcome handleClick(Piece.Color color, int row, int col) {
-        Position previousSelection = getSelection(color);
+    private ClickAttempt handleClick(Piece.Color color, int row, int col) {
         Position to = new Position(row, col);
-        ClickSelector.Result result;
         synchronized (lock) {
-            result = ClickSelector.handleClick(engine, previousSelection, row, col, color);
+            if (isPausedForDisconnect()) {
+                return new ClickAttempt(true, null, null, null);
+            }
+            Position previousSelection = getSelection(color);
+            ClickSelector.Result result = ClickSelector.handleClick(engine, previousSelection, row, col, color);
             setSelection(color, result.selection());
             if (result.outcome() == ClickSelector.Outcome.MOVE_ACCEPTED) {
                 pendingActions.add(new PendingAction(ActionKind.MOVE, color, previousSelection, to));
             }
+            return new ClickAttempt(false, result.outcome(), previousSelection, to);
         }
-        if (result.outcome() == ClickSelector.Outcome.MOVE_ACCEPTED) {
-            broadcastEvent("MOVE_ACCEPTED", color, previousSelection, to);
+    }
+
+    /** Result of one jump attempt - see {@link #handleJump}. */
+    private static final class JumpAttempt {
+        final boolean paused;
+        final boolean owns;
+        final boolean started;
+        final Position pos;
+
+        JumpAttempt(boolean paused, boolean owns, boolean started, Position pos) {
+            this.paused = paused;
+            this.owns = owns;
+            this.started = started;
+            this.pos = pos;
         }
-        return result.outcome();
     }
 
     /**
-     * @return false if the piece at (row, col) doesn't belong to {@code color} (no command was attempted at all).
-     * True covers both a jump that actually started (watched for {@code JUMP_COMPLETED}) and one that was too
-     * late and captured the piece instead - both are valid, non-error outcomes of an owned command.
+     * The pause check, ownership check, and the jump request itself all
+     * happen inside one {@code synchronized(lock)} block - see {@link
+     * #handleClick} for why. {@code owns} is false only if the piece at
+     * (row, col) doesn't belong to {@code color} (no command was attempted
+     * at all); {@code started} covers both a jump that actually started
+     * (watched for {@code JUMP_COMPLETED}) and one that was too late and
+     * captured the piece instead - both are valid, non-error outcomes of an
+     * owned command.
      */
-    private boolean handleJump(Piece.Color color, int row, int col) {
-        boolean owns;
-        boolean started = false;
+    private JumpAttempt handleJump(Piece.Color color, int row, int col) {
         Position pos = new Position(row, col);
         synchronized (lock) {
-            owns = ownsPieceAt(color, row, col);
+            if (isPausedForDisconnect()) {
+                return new JumpAttempt(true, false, false, pos);
+            }
+            boolean owns = ownsPieceAt(color, row, col);
+            boolean started = false;
             if (owns) {
                 started = engine.requestJump(row, col);
                 if (started) pendingActions.add(new PendingAction(ActionKind.JUMP, color, pos, pos));
             }
+            return new JumpAttempt(false, owns, started, pos);
         }
-        if (started) broadcastEvent("JUMP_ACCEPTED", color, pos, null);
-        return owns;
     }
 
     /**
@@ -503,8 +598,13 @@ public class GameSession {
     }
 
     private void broadcastAll(String message) {
-        send(whiteConnection, message);
-        send(blackConnection, message);
+        OutboundConnection white, black;
+        synchronized (lock) {
+            white = whiteConnection;
+            black = blackConnection;
+        }
+        send(white, message);
+        send(black, message);
         for (OutboundConnection viewer : viewers) send(viewer, message);
     }
 
@@ -533,30 +633,47 @@ public class GameSession {
      * spectators - rejoining the room via a fresh join_room is enough).
      */
     public void handleDisconnect(OutboundConnection connection) {
-        if (connection == whiteConnection) {
-            whiteConnection = null;
-            whiteAbandonTask = scheduleAutoAbandon(Piece.Color.WHITE);
-            if (whiteAbandonTask != null) notifyOpponentOfDisconnect(Piece.Color.WHITE);
-        } else if (connection == blackConnection) {
-            blackConnection = null;
-            blackAbandonTask = scheduleAutoAbandon(Piece.Color.BLACK);
-            if (blackAbandonTask != null) notifyOpponentOfDisconnect(Piece.Color.BLACK);
-        } else {
-            viewers.remove(connection);
+        Piece.Color disconnectedColor = null;
+        synchronized (lock) {
+            if (connection == whiteConnection) {
+                whiteConnection = null;
+                whiteAbandonTask = scheduleAutoAbandon(Piece.Color.WHITE);
+                if (whiteAbandonTask != null) disconnectedColor = Piece.Color.WHITE;
+            } else if (connection == blackConnection) {
+                blackConnection = null;
+                blackAbandonTask = scheduleAutoAbandon(Piece.Color.BLACK);
+                if (blackAbandonTask != null) disconnectedColor = Piece.Color.BLACK;
+            } else {
+                viewers.remove(connection);
+            }
         }
+        // Scheduling the abandon task and assigning it to whiteAbandonTask/
+        // blackAbandonTask above happen inside the same lock acquisition as
+        // nulling out the connection field - a concurrent reconnect() (which
+        // also synchronizes on lock) can now never observe the connection as
+        // already null while the abandon task field is still unset, which is
+        // exactly the window that used to let a just-cancelled abandon fire
+        // anyway against an already-reconnected opponent.
+        if (disconnectedColor != null) notifyOpponentOfDisconnect(disconnectedColor);
     }
 
     /** Tells the still-connected side (and any viewers) that {@code disconnectedColor} just dropped, and how long they have before the game is auto-abandoned. */
     private void notifyOpponentOfDisconnect(Piece.Color disconnectedColor) {
+        OutboundConnection other;
+        synchronized (lock) {
+            other = disconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        }
         String message = Protocol.OPPONENT_DISCONNECTED + "|" + (disconnectGraceMillis / 1000);
-        OutboundConnection other = disconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
         send(other, message);
         for (OutboundConnection viewer : viewers) send(viewer, message);
     }
 
     /** Tells the still-connected side (and any viewers) that {@code reconnectedColor} is back. */
     private void notifyOpponentOfReconnect(Piece.Color reconnectedColor) {
-        OutboundConnection other = reconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        OutboundConnection other;
+        synchronized (lock) {
+            other = reconnectedColor == Piece.Color.WHITE ? blackConnection : whiteConnection;
+        }
         send(other, Protocol.OPPONENT_RECONNECTED);
         for (OutboundConnection viewer : viewers) send(viewer, Protocol.OPPONENT_RECONNECTED);
     }
@@ -574,26 +691,28 @@ public class GameSession {
      * disconnect-triggered abandon, most commonly) - reconnecting a player
      * who comes back is exactly what lets them request a rematch instead of
      * being stuck GAME_PAUSED forever; see
-     * testEitherSeatedPlayerCanRequestARematchOnceTheGameIsOver.
+     * testEitherSeatedPlayerCanRequestARematchOnceTheGameIsOver. The seat
+     * check-and-set happens inside the same lock {@link #handleDisconnect}
+     * uses, so the two can never interleave.
      */
-    public synchronized boolean reconnect(OutboundConnection connection, String username) {
-        if (username.equals(whiteUsername) && whiteConnection == null) {
-            whiteConnection = connection;
-            cancelAbandonTask(Piece.Color.WHITE);
-            activityLog.log("room=" + roomCode + " " + username + " reconnected as WHITE");
-            greet(connection, Seat.WHITE);
-            notifyOpponentOfReconnect(Piece.Color.WHITE);
-            return true;
+    public boolean reconnect(OutboundConnection connection, String username) {
+        Seat seat = null;
+        synchronized (lock) {
+            if (username.equals(whiteUsername) && whiteConnection == null) {
+                whiteConnection = connection;
+                cancelAbandonTask(Piece.Color.WHITE);
+                seat = Seat.WHITE;
+            } else if (username.equals(blackUsername) && blackConnection == null) {
+                blackConnection = connection;
+                cancelAbandonTask(Piece.Color.BLACK);
+                seat = Seat.BLACK;
+            }
         }
-        if (username.equals(blackUsername) && blackConnection == null) {
-            blackConnection = connection;
-            cancelAbandonTask(Piece.Color.BLACK);
-            activityLog.log("room=" + roomCode + " " + username + " reconnected as BLACK");
-            greet(connection, Seat.BLACK);
-            notifyOpponentOfReconnect(Piece.Color.BLACK);
-            return true;
-        }
-        return false;
+        if (seat == null) return false;
+        activityLog.log("room=" + roomCode + " " + username + " reconnected as " + seat);
+        greet(connection, seat);
+        notifyOpponentOfReconnect(seat.toColor());
+        return true;
     }
 
     // Cancels a pending scheduleAutoAbandon task for one color, if any (called by reconnect).
@@ -630,8 +749,13 @@ public class GameSession {
         GameSnapshot whiteView = buildSnapshotFor(Piece.Color.WHITE);
         GameSnapshot blackView = buildSnapshotFor(Piece.Color.BLACK);
         String whiteMessage = encode(whiteView);
-        send(whiteConnection, whiteMessage);
-        send(blackConnection, encode(blackView));
+        OutboundConnection white, black;
+        synchronized (lock) {
+            white = whiteConnection;
+            black = blackConnection;
+        }
+        send(white, whiteMessage);
+        send(black, encode(blackView));
 
         if (!viewers.isEmpty()) {
             String neutralMessage = encode(buildNeutralSnapshot());
@@ -672,17 +796,36 @@ public class GameSession {
      * (abandoned after a disconnect timeout - see {@link #scheduleAutoAbandon})
      * intentionally skips this entirely: nobody's rating changes, since
      * neither side did anything to deserve a loss.
+     *
+     * {@code broadcastSnapshot()} can run concurrently from two different
+     * threads (the ticker and a just-handled click/jump that ends the game
+     * on the very same tick) - the check-and-set of {@code ratingApplied}
+     * plus reading the two usernames/ratings all happen inside one {@code
+     * synchronized(lock)} block so at most one of those concurrent calls
+     * ever proceeds to actually apply the rating change/record the game;
+     * the slower ELO/DB work itself runs outside the lock.
      */
     private void applyRatingChangeIfGameJustEnded(GameSnapshot snapshot) {
-        if (!snapshot.gameOver() || snapshot.winner() == null || ratingApplied) return;
-        if (whiteUsername == null || blackUsername == null) return;
-        ratingApplied = true;
+        if (!snapshot.gameOver() || snapshot.winner() == null) return;
 
-        boolean whiteWon = "WHITE".equals(snapshot.winner());
-        String winnerName = whiteWon ? whiteUsername : blackUsername;
-        String loserName = whiteWon ? blackUsername : whiteUsername;
-        int winnerRating = whiteWon ? whiteRating : blackRating;
-        int loserRating = whiteWon ? blackRating : whiteRating;
+        String whiteUser, blackUser;
+        int whiteRatingBefore, blackRatingBefore;
+        boolean whiteWon;
+        synchronized (lock) {
+            if (ratingApplied) return;
+            if (whiteUsername == null || blackUsername == null) return;
+            ratingApplied = true;
+            whiteUser = whiteUsername;
+            blackUser = blackUsername;
+            whiteRatingBefore = whiteRating;
+            blackRatingBefore = blackRating;
+            whiteWon = "WHITE".equals(snapshot.winner());
+        }
+
+        String winnerName = whiteWon ? whiteUser : blackUser;
+        String loserName = whiteWon ? blackUser : whiteUser;
+        int winnerRating = whiteWon ? whiteRatingBefore : blackRatingBefore;
+        int loserRating = whiteWon ? blackRatingBefore : whiteRatingBefore;
 
         RatingService.Outcome outcome = ratingService.applyGameEnd(winnerName, winnerRating, loserName, loserRating);
         activityLog.log("room=" + roomCode + " GAME_OVER " + winnerName + " (" + winnerRating + " -> " + outcome.newWinnerRating
@@ -690,8 +833,8 @@ public class GameSession {
 
         int whiteRatingAfter = whiteWon ? outcome.newWinnerRating : outcome.newLoserRating;
         int blackRatingAfter = whiteWon ? outcome.newLoserRating : outcome.newWinnerRating;
-        gameResultRepository.recordGame(roomCode, whiteUsername, blackUsername, winnerName,
-                whiteRating, whiteRatingAfter, blackRating, blackRatingAfter,
+        gameResultRepository.recordGame(roomCode, whiteUser, blackUser, winnerName,
+                whiteRatingBefore, whiteRatingAfter, blackRatingBefore, blackRatingAfter,
                 snapshot.whiteMoves(), snapshot.blackMoves());
     }
 

@@ -51,6 +51,7 @@ public class GameServerShardController {
         dispatcher.subscribe("shard." + shardId + ".seat_pair", msg -> handleSeatPair(new String(msg.getData(), StandardCharsets.UTF_8)));
         dispatcher.subscribe(RemoteRoomCreator.subjectFor(shardId), msg -> handleCreateRoom(natsConnection, msg));
         dispatcher.subscribe(loadSubject(shardId), msg -> handleLoadQuery(natsConnection, msg));
+        dispatcher.subscribe(checkoutSubject(shardId), msg -> handleCheckout(natsConnection, msg));
     }
 
     /** The subject GameAllocatorService requests on to ask this shard's current load - see handleLoadQuery. */
@@ -58,10 +59,23 @@ public class GameServerShardController {
         return "shard." + shardId + ".load";
     }
 
+    /** The subject KungFuChessServerService requests on before letting a connection currently associated with this shard send a fresh "play"/"join_room" - see handleCheckout. */
+    public static String checkoutSubject(String shardId) {
+        return "shard." + shardId + ".checkout";
+    }
+
     // Empty request, replies with this shard's own Lobby.activeGameCount() as plain text - the load-aware half of "Step 6a" (see Server_Design.md's "Not done yet").
     private void handleLoadQuery(Connection natsConnection, Message msg) {
-        String count = String.valueOf(service.activeGameCount());
-        natsConnection.publish(msg.getReplyTo(), count.getBytes(StandardCharsets.UTF_8));
+        try {
+            String count = String.valueOf(service.activeGameCount());
+            natsConnection.publish(msg.getReplyTo(), count.getBytes(StandardCharsets.UTF_8));
+        } catch (RuntimeException e) {
+            // No reply at all here would leave GameAllocatorService waiting out the
+            // full LOAD_QUERY_TIMEOUT with nothing in this shard's own log explaining
+            // why - logging it (matching every sibling handler in this class) at
+            // least makes that failure diagnosable instead of silent.
+            activityLog.log("load query failed unexpectedly: " + e);
+        }
     }
 
     private void handleCommand(String encoded) {
@@ -102,9 +116,27 @@ public class GameServerShardController {
 
     // The other end of RemoteRoomCreator - already routed to this specific shard by GameAllocatorClient.
     private void handleCreateRoom(Connection natsConnection, Message msg) {
-        String username = new String(msg.getData(), StandardCharsets.UTF_8);
-        String code = service.createRoom(username);
-        natsConnection.publish(msg.getReplyTo(), code.getBytes(StandardCharsets.UTF_8));
+        try {
+            String username = new String(msg.getData(), StandardCharsets.UTF_8);
+            String code = service.createRoom(username);
+            natsConnection.publish(msg.getReplyTo(), code.getBytes(StandardCharsets.UTF_8));
+        } catch (RuntimeException e) {
+            // No reply here leaves RemoteRoomCreator waiting out its full 5s timeout
+            // with nothing logged anywhere explaining why - log it, matching every
+            // sibling handler in this class, instead of failing silently.
+            activityLog.log("create_room failed unexpectedly: " + e);
+        }
+    }
+
+    // Payload is the connectionId; replies "1" (may proceed - see checkoutForNewGame) or "0" (still actively playing here).
+    private void handleCheckout(Connection natsConnection, Message msg) {
+        try {
+            String connectionId = new String(msg.getData(), StandardCharsets.UTF_8);
+            boolean canLeave = service.checkoutForNewGame(connectionId);
+            natsConnection.publish(msg.getReplyTo(), (canLeave ? "1" : "0").getBytes(StandardCharsets.UTF_8));
+        } catch (RuntimeException e) {
+            activityLog.log("checkout failed unexpectedly: " + e);
+        }
     }
 
     public void stop() {
@@ -114,5 +146,6 @@ public class GameServerShardController {
         dispatcher.unsubscribe("shard." + shardId + ".seat_pair");
         dispatcher.unsubscribe(RemoteRoomCreator.subjectFor(shardId));
         dispatcher.unsubscribe(loadSubject(shardId));
+        dispatcher.unsubscribe(checkoutSubject(shardId));
     }
 }

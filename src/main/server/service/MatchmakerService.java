@@ -3,6 +3,9 @@ package server.service;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import io.nats.client.Connection;
 
@@ -30,10 +33,20 @@ import server.connection.RemoteOutboundConnection;
  */
 public class MatchmakerService {
     private static final long DEFAULT_TIMEOUT_MILLIS = 60_000L;
+    // See GameServerShardService's own CLOSED_CONNECTION_RETENTION_MILLIS for why this
+    // is neither 0 (forget immediately) nor infinite (unbounded growth) - same reasoning
+    // applies here: "gateway.disconnect" is a cluster-wide broadcast this service also
+    // subscribes to, for connectionIds it may never have queued at all.
+    private static final long CLOSED_CONNECTION_RETENTION_MILLIS = 60_000L;
 
     private final Connection natsConnection;
     private final MatchQueue matchQueue;
     private final Map<String, RemoteOutboundConnection> connections = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "matchmaker-connection-cleanup");
+        t.setDaemon(true);
+        return t;
+    });
 
     public MatchmakerService(Connection natsConnection, ActivityLog activityLog) {
         this(natsConnection, activityLog, null);
@@ -60,9 +73,18 @@ public class MatchmakerService {
         return connections.computeIfAbsent(connectionId, id -> new RemoteOutboundConnection(id, natsConnection));
     }
 
-    /** "play" - queues or matches, sending WAITING itself if not matched (see MatchQueue's own contract). */
+    /**
+     * "play" - queues or matches, sending WAITING itself if not matched (see
+     * MatchQueue's own contract). If this connectionId was already marked
+     * closed (a disconnect that raced ahead of this very "play" message -
+     * see {@link #handleDisconnect}), it's refused outright instead of being
+     * queued/matched: a dead connection queued here would otherwise go on to
+     * be matched with a real player and seated as a permanently unresponsive
+     * "ghost" opponent on whichever Game Server Shard the match lands on.
+     */
     public void handlePlay(String connectionId, String username, int rating) {
         OutboundConnection connection = connectionFor(connectionId);
+        if (!connection.isOpen()) return;
         boolean matched = matchQueue.play(connection, username, rating);
         if (!matched) connection.send(Protocol.WAITING);
     }
@@ -76,11 +98,20 @@ public class MatchmakerService {
         natsConnection.publish("shard." + shardId + ".seat_pair", encoded.getBytes(StandardCharsets.UTF_8));
     }
 
-    /** payload is just the connectionId - mirrors GameServerShardService's own handleDisconnect. */
+    /**
+     * payload is just the connectionId - mirrors GameServerShardService's
+     * own handleDisconnect, including keeping (not forgetting) the cached,
+     * now-closed connection so a "play" that was already in flight for this
+     * same connectionId (see {@link #handlePlay}) reliably sees it as closed
+     * instead of racing a fresh, wrongly-open instance - evicted again after
+     * {@link #CLOSED_CONNECTION_RETENTION_MILLIS} so this cache doesn't grow
+     * forever across every disconnect in the whole cluster.
+     */
     public void handleDisconnect(String connectionId) {
-        RemoteOutboundConnection connection = connections.remove(connectionId);
-        if (connection == null) return;
+        RemoteOutboundConnection connection = connectionFor(connectionId);
         connection.markClosed();
         matchQueue.cancelQueued(connection);
+        cleanupScheduler.schedule(() -> connections.remove(connectionId, connection),
+                CLOSED_CONNECTION_RETENTION_MILLIS, TimeUnit.MILLISECONDS);
     }
 }

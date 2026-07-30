@@ -81,7 +81,18 @@ public class UserRepository {
         public int getRating() { return rating; }
     }
 
-    // Creates a new account with a fresh salt+hash (calls PasswordHasher); fails if the username is taken.
+    /**
+     * Creates a new account with a fresh salt+hash (calls PasswordHasher);
+     * fails if the username is taken. The upfront {@code findRating} check
+     * is just a fast path for the common case (fails clearly without even
+     * attempting an insert) - it is not what actually prevents a duplicate
+     * username: two concurrent registrations for the same username could
+     * both pass that check before either inserts, so the real guarantee
+     * comes from the table's own PRIMARY KEY constraint on {@code username}
+     * and the catch below, which recognizes a constraint violation and
+     * reports it exactly like the fast-path check does, instead of leaking
+     * it out as a raw {@code IllegalStateException}.
+     */
     public AuthResult register(String username, String password) {
         try (Connection conn = connect()) {
             if (findRating(conn, username) != null) {
@@ -99,8 +110,19 @@ public class UserRepository {
             }
             return AuthResult.ok(STARTING_RATING);
         } catch (SQLException e) {
+            if (isUniqueViolation(e)) {
+                return AuthResult.failure("username taken");
+            }
             throw new IllegalStateException("Registration failed for " + username, e);
         }
+    }
+
+    // Best-effort, driver-agnostic detection of a duplicate-primary-key insert racing with another
+    // registration for the same username: both sqlite-jdbc and postgresql report this under SQLState
+    // class "23" ("Integrity Constraint Violation" in the ANSI SQL standard both drivers follow).
+    private static boolean isUniqueViolation(SQLException e) {
+        String sqlState = e.getSQLState();
+        return sqlState != null && sqlState.startsWith("23");
     }
 
     // Looks up the stored salt/hash and checks the password via PasswordHasher.matches.

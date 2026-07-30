@@ -1,10 +1,13 @@
 package server.controller;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
 
+import logging.ActivityLog;
 import server.GameAllocatorClient;
 import server.service.GameAllocatorService;
 
@@ -29,16 +32,29 @@ import server.service.GameAllocatorService;
  */
 public class GameAllocatorController {
     private final Dispatcher dispatcher;
+    // assignShard() (see GameAllocatorService) can take up to LOAD_QUERY_TIMEOUT even in the
+    // healthy case - handling each "allocator.assign" request on its own executor thread, rather
+    // than inline on the single NATS dispatcher thread, lets concurrent room-allocation requests
+    // (from different rooms being created/matched at once) actually run in parallel instead of
+    // queuing up behind one another.
+    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ActivityLog activityLog;
 
-    public GameAllocatorController(Connection natsConnection, GameAllocatorService service) {
-        this.dispatcher = natsConnection.createDispatcher(msg -> {
-            String shardId = service.assignShard();
-            natsConnection.publish(msg.getReplyTo(), shardId.getBytes(StandardCharsets.UTF_8));
-        });
+    public GameAllocatorController(Connection natsConnection, GameAllocatorService service, ActivityLog activityLog) {
+        this.activityLog = activityLog;
+        this.dispatcher = natsConnection.createDispatcher(msg -> executor.submit(() -> {
+            try {
+                String shardId = service.assignShard();
+                natsConnection.publish(msg.getReplyTo(), shardId.getBytes(StandardCharsets.UTF_8));
+            } catch (RuntimeException e) {
+                activityLog.log("allocator.assign failed unexpectedly: " + e);
+            }
+        }));
         dispatcher.subscribe(GameAllocatorClient.SUBJECT);
     }
 
     public void stop() {
         dispatcher.unsubscribe(GameAllocatorClient.SUBJECT);
+        executor.shutdown();
     }
 }

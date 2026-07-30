@@ -2,6 +2,7 @@ package server.service;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -11,6 +12,7 @@ import org.java_websocket.WebSocket;
 
 import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
+import io.nats.client.Message;
 import io.nats.client.Nats;
 
 import bus.Bus;
@@ -29,6 +31,7 @@ import server.auth.SessionTokenStore;
 import server.auth.UserRepository;
 import server.connection.LocalOutboundConnection;
 import server.connection.OutboundConnection;
+import server.controller.GameServerShardController;
 import server.controller.HttpApiServer;
 import server.reconnect.InMemoryReconnectRegistry;
 import server.reconnect.ReconnectRegistry;
@@ -75,6 +78,11 @@ import server.room.RoomDirectory;
  * Server_Design.md's "Step 5" and "Step 6a".
  */
 public class KungFuChessServerService {
+    // Timeout for the "may this connection start a new game" checkout request
+    // routeDistributedCommand makes to a connection's currently-associated shard -
+    // see requestCheckout.
+    private static final Duration CHECKOUT_TIMEOUT = Duration.ofSeconds(5);
+
     private final boolean distributed;
     private final ActivityLog activityLog;
     private final SessionTokenStore sessionTokenStore;
@@ -240,11 +248,36 @@ public class KungFuChessServerService {
      * #shardOf}, populated once some shard has announced ownership of this
      * connectionId (see {@link #handleOpen}'s {@code "conn.<id>.shard"}
      * subscription).
+     *
+     * Before either "play" or "join_room" is allowed through, if {@link
+     * #shardOf} already points at a shard for this connection, that shard is
+     * asked (see {@link #requestCheckout}) whether it's safe to start a
+     * brand-new game. Without this, nothing here stops a connection that's
+     * still actively seated in a live game on shard A from sending "play"/
+     * "join_room" and getting seated a second time on shard B - shard A has
+     * no way to learn about that on its own (its Lobby/GameSession state is
+     * entirely local), so the original opponent would be left staring at a
+     * "connected" seat that will never move again. The embedded topology
+     * gets this guard for free (doHandleMessage checks lobby.sessionOf(...)
+     * in-process before ever reaching this dispatch); this is the same
+     * invariant, enforced across the distributed topology's process
+     * boundary instead.
      */
     private void routeDistributedCommand(WebSocket conn, String message) {
         String[] parts = message.trim().split("\\s+", 2);
         String verb = parts.length > 0 ? parts[0] : "";
         String envelope = new GatewayCommandEnvelope(connectionIds.get(conn), usernames.get(conn), ratings.get(conn), message).encode();
+
+        if (verb.equals(Protocol.PLAY) || verb.equals(Protocol.JOIN_ROOM)) {
+            String currentShard = shardOf.get(conn);
+            if (currentShard != null) {
+                if (!requestCheckout(currentShard, connectionIds.get(conn))) {
+                    conn.send(Protocol.ERROR + "|ALREADY_IN_A_GAME");
+                    return;
+                }
+                shardOf.remove(conn);
+            }
+        }
 
         if (verb.equals(Protocol.PLAY)) {
             gatewayNatsConnection.publish("matchmaker.play", envelope.getBytes(StandardCharsets.UTF_8));
@@ -274,6 +307,31 @@ public class KungFuChessServerService {
         }
 
         gatewayNatsConnection.publish("shard." + shardId + ".command", envelope.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Blocking NATS request-reply asking {@code shardId} whether {@code
+     * connectionId} may start a brand-new game (see
+     * GameServerShardService#checkoutForNewGame) - true if it has no session
+     * there at all, or only a finished one (left as a side effect); false if
+     * it's still actively seated in a live game. An unresponsive shard (no
+     * reply within {@link #CHECKOUT_TIMEOUT}) is treated as "still busy" -
+     * refusing the new game request is the safe failure mode here, since the
+     * alternative (assuming it's fine) risks the exact duplicate-seat
+     * problem this check exists to prevent.
+     */
+    private boolean requestCheckout(String shardId, String connectionId) {
+        try {
+            Message reply = gatewayNatsConnection.request(
+                    GameServerShardController.checkoutSubject(shardId),
+                    connectionId.getBytes(StandardCharsets.UTF_8),
+                    CHECKOUT_TIMEOUT);
+            if (reply == null) return false;
+            return "1".equals(new String(reply.getData(), StandardCharsets.UTF_8));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     // Parses "attach <token>" (token minted by the REST login/register endpoints, see HttpApiServer/ApiGateway), replies AUTH_OK/ERROR. Always handled locally (SessionTokenStore is directly reachable in both topologies) - only what happens on success (a reconnect attempt) differs by topology.

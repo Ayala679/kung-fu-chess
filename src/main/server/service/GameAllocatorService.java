@@ -3,6 +3,11 @@ package server.service;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.nats.client.Connection;
 import io.nats.client.Message;
@@ -34,6 +39,10 @@ public class GameAllocatorService {
     private final List<String> shardIds;
     private final ShardPicker fallbackPicker;
     private final ActivityLog activityLog;
+    // Only used to run the blocking per-shard NATS requests concurrently
+    // (see assignShard) - not for anything else, so a small fixed pool is
+    // plenty even with many shards configured.
+    private final ExecutorService loadQueryExecutor = Executors.newCachedThreadPool();
 
     public GameAllocatorService(Connection natsConnection, List<String> shardIds, ShardPicker fallbackPicker, ActivityLog activityLog) {
         this.natsConnection = natsConnection;
@@ -42,16 +51,29 @@ public class GameAllocatorService {
         this.activityLog = activityLog;
     }
 
-    /** Picks the least-loaded shard for a brand-new room, falling back to round-robin if no shard's load could be determined. */
+    /**
+     * Picks the least-loaded shard for a brand-new room, falling back to
+     * round-robin if no shard's load could be determined. Every shard is
+     * queried concurrently (not one after another) - each query is its own
+     * blocking NATS request bounded by {@link #LOAD_QUERY_TIMEOUT}, so
+     * querying N shards sequentially could take up to N * 300ms if some of
+     * them are unresponsive; done concurrently, the whole call is bounded by
+     * a single LOAD_QUERY_TIMEOUT regardless of how many shards are
+     * configured.
+     */
     public String assignShard() {
+        Map<String, CompletableFuture<Integer>> loads = new ConcurrentHashMap<>();
+        for (String shardId : shardIds) {
+            loads.put(shardId, CompletableFuture.supplyAsync(() -> queryLoad(shardId), loadQueryExecutor));
+        }
+
         String leastLoaded = null;
         int lowestLoad = Integer.MAX_VALUE;
-
-        for (String shardId : shardIds) {
-            Integer load = queryLoad(shardId);
+        for (Map.Entry<String, CompletableFuture<Integer>> entry : loads.entrySet()) {
+            Integer load = entry.getValue().join();
             if (load != null && load < lowestLoad) {
                 lowestLoad = load;
-                leastLoaded = shardId;
+                leastLoaded = entry.getKey();
             }
         }
 

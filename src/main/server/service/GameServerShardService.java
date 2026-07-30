@@ -3,6 +3,9 @@ package server.service;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import io.nats.client.Connection;
 
@@ -27,10 +30,28 @@ import server.connection.RemoteOutboundConnection;
  * WS Gateway (see "Step 6a" in Server_Design.md).
  */
 public class GameServerShardService {
+    // "gateway.disconnect" is a broadcast every shard receives for every
+    // connection in the whole cluster (see this class's own Javadoc), not
+    // just ones this shard actually owns - so handleDisconnect (below) can't
+    // simply forget an unrecognized connectionId the way it briefly used to,
+    // without reintroducing the "ghost seat" race described there. Evicting
+    // a closed, cluster-wide-irrelevant entry after a short delay instead of
+    // either extreme (forget immediately / keep forever) bounds this cache's
+    // size without reopening that race - a connectionId is never reused
+    // (KungFuChessServerService.handleOpen mints a fresh random one per
+    // connection), so nothing legitimate can ever need this exact entry back
+    // once it's old enough to evict.
+    private static final long CLOSED_CONNECTION_RETENTION_MILLIS = 60_000L;
+
     private final Connection natsConnection;
     private final Lobby lobby;
     private final String shardId;
     private final Map<String, RemoteOutboundConnection> connections = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "shard-connection-cleanup");
+        t.setDaemon(true);
+        return t;
+    });
 
     public GameServerShardService(Connection natsConnection, Lobby lobby, String shardId) {
         this.natsConnection = natsConnection;
@@ -113,12 +134,32 @@ public class GameServerShardService {
         }
     }
 
-    // Mirrors KungFuChessServerService's own handleDisconnect for the local topology.
+    /**
+     * Mirrors KungFuChessServerService's own handleDisconnect for the local
+     * topology. Deliberately does NOT remove connectionId from {@link
+     * #connections} the way it briefly used to - "gateway.disconnect" is a
+     * broadcast every shard receives (see this class's own Javadoc), so this
+     * can easily be the very first time this specific shard has ever heard
+     * of connectionId (e.g. it disconnected in the narrow window between
+     * being matched by the Matchmaker and this shard actually processing the
+     * resulting seat_pair). Forgetting the id entirely in that case used to
+     * mean a *later* seat_pair/join_room would call connectionFor(id) and
+     * create a brand-new RemoteOutboundConnection defaulting to open=true -
+     * a "ghost" seat GameSession would treat as a live, connected opponent
+     * forever, since the one real disconnect event for that id had already
+     * come and gone unrecorded. Keeping (and marking closed) the cached
+     * connection instead means any later connectionFor(id) call finds this
+     * same, already-closed instance - see GameSession.join's own isOpen()
+     * check, which now reacts to that immediately. The entry is evicted
+     * again after {@link #CLOSED_CONNECTION_RETENTION_MILLIS} so this cache
+     * doesn't grow forever across every disconnect in the whole cluster.
+     */
     public void handleDisconnect(String connectionId) {
-        RemoteOutboundConnection connection = connections.remove(connectionId);
-        if (connection == null) return;
+        RemoteOutboundConnection connection = connectionFor(connectionId);
         connection.markClosed();
         lobby.handleDisconnect(connection);
+        cleanupScheduler.schedule(() -> connections.remove(connectionId, connection),
+                CLOSED_CONNECTION_RETENTION_MILLIS, TimeUnit.MILLISECONDS);
     }
 
     /** REST "create room", relayed here already routed to this specific shard by GameAllocatorClient - see RemoteRoomCreator. */
@@ -129,5 +170,32 @@ public class GameServerShardService {
     /** Answers this shard's own "shard.&lt;id&gt;.load" query (see GameServerShardController) - how many in-progress games it's currently hosting, so GameAllocatorService can pick the least-loaded shard instead of pure round-robin. */
     public int activeGameCount() {
         return lobby.activeGameCount();
+    }
+
+    /**
+     * Answers this shard's own "shard.&lt;id&gt;.checkout" query (see
+     * GameServerShardController) - asked by KungFuChessServerService before
+     * it lets a connection that's currently associated with this shard
+     * (KungFuChessServerService's own {@code shardOf} cache) send a fresh
+     * "play"/"join_room", so this shard gets a say instead of the Gateway
+     * silently re-routing the connection to a brand-new game while it's
+     * still actively seated here - the exact guard the embedded topology
+     * gets for free from {@code lobby.sessionOf(...)} being checked
+     * in-process before "play"/"join_room" are ever dispatched.
+     *
+     * @return true if connectionId has no session on this shard at all, or
+     * only a finished one (which is left as a side effect, exactly like
+     * {@link #handleCommand} already does for an in-band lobby command
+     * against a finished session) - false if it's still actively seated in
+     * a game here, in which case the Gateway must refuse the request rather
+     * than let the connection start a second, simultaneous game elsewhere.
+     */
+    public boolean checkoutForNewGame(String connectionId) {
+        OutboundConnection connection = connectionFor(connectionId);
+        GameSession session = lobby.sessionOf(connection);
+        if (session == null) return true;
+        if (!session.isGameOver()) return false;
+        lobby.leaveFinishedSessionIfAny(connection);
+        return true;
     }
 }

@@ -86,32 +86,56 @@ public class MatchQueue {
      * #timeoutMillis}, it's removed from the queue and sent an explicit
      * ERROR instead of waiting forever.
      */
-    public synchronized boolean play(OutboundConnection connection, String username, int rating) {
+    public boolean play(OutboundConnection connection, String username, int rating) {
         String id = connection.id();
-        liveConnections.put(id, connection);
+        MatchmakingQueueStore.Entry matchedEntry = null;
+        OutboundConnection matchedConnection = null;
 
-        for (MatchmakingQueueStore.Entry candidate : store.all()) {
-            OutboundConnection candidateConnection = liveConnections.get(candidate.connectionId());
-            if (candidateConnection == null) {
-                // Stale - this instance never registered that connectionId locally (e.g. a Redis entry surviving a restart). Self-heal and keep scanning.
-                store.remove(candidate.connectionId());
-                cancelTimeoutTask(candidate.connectionId());
-                continue;
+        // The queue scan/removal is atomic (synchronized on this), but the
+        // MatchFoundListener callback itself is deliberately called *after*
+        // this block, with the lock already released: in the distributed
+        // topology that callback (MatchmakerService.onMatchFound) makes a
+        // blocking cross-process NATS round trip to the Game Allocator - to
+        // pick a shard - before it's done. Holding this queue's own lock for
+        // that entire round trip would serialize every other player's play/
+        // cancelQueued/timeout behind it, which is exactly the kind of
+        // "lock held across blocking network I/O" bottleneck a matchmaking
+        // queue can't afford under load.
+        synchronized (this) {
+            liveConnections.put(id, connection);
+
+            for (MatchmakingQueueStore.Entry candidate : store.all()) {
+                OutboundConnection candidateConnection = liveConnections.get(candidate.connectionId());
+                if (candidateConnection == null) {
+                    // Stale - this instance never registered that connectionId locally (e.g. a Redis entry surviving a restart). Self-heal and keep scanning.
+                    store.remove(candidate.connectionId());
+                    cancelTimeoutTask(candidate.connectionId());
+                    continue;
+                }
+                if (Math.abs(candidate.rating() - rating) <= MATCHMAKING_ELO_RANGE) {
+                    store.remove(candidate.connectionId());
+                    cancelTimeoutTask(candidate.connectionId());
+                    liveConnections.remove(candidate.connectionId());
+                    liveConnections.remove(id);
+                    matchedEntry = candidate;
+                    matchedConnection = candidateConnection;
+                    break;
+                }
             }
-            if (Math.abs(candidate.rating() - rating) <= MATCHMAKING_ELO_RANGE) {
-                store.remove(candidate.connectionId());
-                cancelTimeoutTask(candidate.connectionId());
-                liveConnections.remove(candidate.connectionId());
-                liveConnections.remove(id);
-                activityLog.log("quick-match: " + candidate.username() + " vs " + username);
-                listener.onMatchFound(candidateConnection, candidate.username(), candidate.rating(), connection, username, rating);
-                return true;
+
+            if (matchedEntry == null) {
+                store.add(new MatchmakingQueueStore.Entry(id, username, rating, System.currentTimeMillis()));
+                ScheduledFuture<?> task = scheduler.schedule(() -> handleTimeout(id), timeoutMillis, TimeUnit.MILLISECONDS);
+                timeoutTasks.put(id, task);
             }
         }
 
-        store.add(new MatchmakingQueueStore.Entry(id, username, rating, System.currentTimeMillis()));
-        ScheduledFuture<?> task = scheduler.schedule(() -> handleTimeout(id), timeoutMillis, TimeUnit.MILLISECONDS);
-        timeoutTasks.put(id, task);
+        if (matchedEntry != null) {
+            activityLog.log("quick-match: " + matchedEntry.username() + " vs " + username);
+            listener.onMatchFound(matchedConnection, matchedEntry.username(), matchedEntry.rating(), connection, username, rating);
+            return true;
+        }
+
         activityLog.log(username + " (" + rating + ") queued for quick-match");
         return false;
     }

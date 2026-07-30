@@ -6,7 +6,9 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import model.MoveLogEntry;
 
@@ -23,7 +25,18 @@ import model.MoveLogEntry;
  * UserRepository (at most a couple of players per process/shard).
  */
 public class GameResultRepository {
+    // One instance per distinct jdbcUrl, shared across every GameSession backed by
+    // the same database within this process - the constructor runs a CREATE TABLE
+    // IF NOT EXISTS on every call, so a fresh instance per room/quick-match would
+    // otherwise re-run that DDL statement on every single game created.
+    private static final Map<String, GameResultRepository> INSTANCES = new ConcurrentHashMap<>();
+
     private final String jdbcUrl;
+
+    /** The shared instance for this jdbcUrl - see the class-level note above on why this is preferred over {@code new GameResultRepository(...)} for every caller except tests that want a fresh, isolated instance. */
+    public static GameResultRepository forJdbcUrl(String jdbcUrl) {
+        return INSTANCES.computeIfAbsent(jdbcUrl, GameResultRepository::new);
+    }
 
     public GameResultRepository(String jdbcUrl) {
         this.jdbcUrl = jdbcUrl;
