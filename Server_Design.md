@@ -37,12 +37,12 @@ kept fully working end to end before moving on:
 | API Gateway (REST: login, rooms, history) | `server.HttpApiServer` - `POST /api/login`, `POST /api/register`, `POST /api/rooms`. Runs as its own process, entry point `server.ApiGatewayMain` (own `main`, wires `server.ApiGateway`), in the Docker Compose deployment (see "Step 4" below) - separate from the WS Gateway/Game Server Shard, talking to it only over NATS request-reply. Still embeds in the same process for local/offline runs (no Redis/NATS configured). |
 | WS Gateway (live connections, state updates) | `server.KungFuChessServerController`/`KungFuChessServerService` (entry point `server.KungFuChessServerMain`), now a genuinely separate process/container (`ws-gateway`) from a Game Server Shard in the Docker Compose deployment - see "Step 5" below. First message is still `attach <token>`; once attached, every command (`play`/`join_room <code>`/`click`/`jump`/`rematch`) is relayed to the right Shard over NATS rather than handled in-process. Still embeds `Lobby`/`GameSession` directly for local/offline runs (no Redis/NATS configured), unchanged. |
 | Matchmaker | `server.MatchmakerController`/`MatchmakerService` (entry point `server.MatchmakerMain`) - its own process (needs only `KFC_NATS_URL`), owning `server.MatchQueue` (the ELO-ranged, ±100, quick-match pairing queue). Reached by a Game Server Shard forwarding "play" commands over NATS (`"matchmaker.play"`); on a match, asks the Game Allocator for a shard and publishes to that shard's own `"shard.<id>.seat_pair"` for it to seat via `Lobby.seatMatchedPair`. See "Step 5 refinement"/"Step 6a"/"Step 6d" below. |
-| Game Allocator (decides which shard runs a room) | `server.GameAllocatorController`/`GameAllocatorService` (entry point `server.GameAllocatorMain`) - its own process (needs only `KFC_NATS_URL` + `KFC_SHARD_IDS`), owning `server.ShardPicker` (static round-robin over the configured shard list). Answers `"allocator.assign"` NATS requests with the next shard id. See "Step 6a" below. |
+| Game Allocator (decides which shard runs a room) | `server.GameAllocatorController`/`GameAllocatorService` (entry point `server.GameAllocatorMain`) - its own process (needs only `KFC_NATS_URL` + `KFC_SHARD_IDS`). Load-aware: queries each configured shard's `"shard.<id>.load"` (current in-progress game count) and picks the least-loaded, falling back to `server.ShardPicker`'s static round-robin if none respond in time. Answers `"allocator.assign"` NATS requests with the chosen shard id. See "Step 6a" below. |
 | Game Server Shards (authoritative GameEngine, many instances) | `server.GameSession` + `gameengine.GameEngine` - exactly the same engine the offline client uses, inside `server.GameServerShardController`/`GameServerShardService` (entry point `server.GameServerShardMain`). **Two** instances now run in the Docker Compose deployment (`game-server-shard-1`/`-2`, each its own `KFC_SHARD_ID`), each with its own `Lobby`/rooms - see "Step 6a" below for how the WS Gateway/Matchmaker/API Gateway route to the right one. |
 | Observability (logs, metrics, health checks, load tests) | `logging.ActivityLog` only (append-only text log, server-side + one per client). No metrics, no health-check endpoint, no load tests. |
 | NATS / Redis (internal pub-sub between services) | `bus.Bus` - an interface now. `InMemoryBus` (local/offline runs, every unit test) or `NatsBus` (a real NATS connection, `KFC_NATS_URL` set - the Docker Compose deployment). Genuinely in active cross-process use as of step 5 - see below - not just a ready-but-unused abstraction any more. |
-| Redis (sessions, active rooms, reconnect, matchmaking queue, room→shard routing) | **Partly done** - see "Step 3" below for exactly what moved to Redis and what's deliberately still in-process (`Lobby.rooms`/`sessionByConnection`, and `MatchQueue`'s own queue - inside the standalone `Matchmaker` process, still an in-memory queue, not Redis-backed). `RoomDirectory` (`roomCode → shardId`, "Step 6a") is the newest Redis-backed store, in the same dual-mode shape as `ReconnectRegistry`. |
-| PostgreSQL (users, games, results, move history) | `server.auth.UserRepository` now speaks PostgreSQL when deployed via Docker Compose (see below) - `users` table only (accounts + rating). No `games`/`results`/move-history tables exist yet - move history lives only in each `GameSession`'s in-memory log, never persisted. |
+| Redis (sessions, active rooms, reconnect, matchmaking queue, room→shard routing) | **Partly done** - see "Step 3" below for exactly what moved to Redis and what's deliberately still in-process (`Lobby.rooms`/`sessionByConnection` - a live connection identity can never be shared state). `RoomDirectory` (`roomCode → shardId`, "Step 6a") and `MatchmakingQueueStore` (the Matchmaker's own waiting list, "Not done yet" below) are the newest Redis-backed stores, in the same dual-mode shape as `ReconnectRegistry`. |
+| PostgreSQL (users, games, results, move history) | `server.auth.UserRepository` speaks PostgreSQL when deployed via Docker Compose (see below) - `users` table (accounts + rating). `server.auth.GameResultRepository`, sharing the same database, adds `games` (one row per finished game: room, both usernames, winner, ratings before/after) and `moves` (every move from both sides' logs) - see "Not done yet" below. |
 | Docker Compose (small runnable version) | `Dockerfile` + `docker-compose.yml` at the repo root - `docker compose up --build` runs 9 containers: `postgres`, `redis`, `nats`, `ws-gateway`, `game-server-shard-1`, `game-server-shard-2`, `game-allocator`, `matchmaker`, `api-gateway`. |
 | Kubernetes / K3s | Not started. |
 
@@ -511,16 +511,36 @@ direct Java reference into any of the others.
 
 ## Not done yet (future work)
 
-- **`MatchQueue`'s queue moving to Redis** - deliberately still deferred
-  (see "Step 3" above): even with multiple Game Server Shards now (step
-  6a), there's still only ever one `Matchmaker` process, so nothing yet
-  needs to see the same queue from two places.
-- **`games`/`results`/move-history tables** in PostgreSQL - move history
-  currently lives only in each `GameSession`'s in-memory log.
-- **Load-aware shard allocation** - `GameAllocator` uses static
-  round-robin (step 6a), deliberately simpler than querying each shard's
-  current game count; a natural extension once Observability (below)
-  gives it something to query.
 - **Observability**: metrics, a health-check endpoint, load tests (step
   6b). Only `ActivityLog`'s append-only text log exists today.
 - **Kubernetes/K3s manifests** (step 6c) - only Docker Compose exists.
+
+Three smaller gaps that used to be listed here are now closed:
+
+- **`MatchQueue`'s queue moving to Redis** - `server.MatchmakingQueueStore`
+  (`InMemoryMatchmakingQueueStore`/`RedisMatchmakingQueueStore`, same
+  dual-mode split as `ReconnectRegistry`/`RoomDirectory`) now backs the
+  waiting list itself when `KFC_REDIS_URL` is set (`MatchmakerService`),
+  so a queued player survives the Matchmaker process restarting instead of
+  just vanishing. Still deliberately scoped to a single active Matchmaker
+  instance at a time - nothing coordinates two instances racing to match
+  the same entry, since only one is ever actually deployed. The live
+  `OutboundConnection` objects and timeout tasks always stay local to
+  whichever process is running (see `MatchQueue`'s class Javadoc) - a
+  stale store entry a restarted instance never registered locally is
+  self-pruned the next time `play()` scans past it.
+- **`games`/`moves` tables** in PostgreSQL/SQLite - `server.auth.GameResultRepository`
+  (same one-connection-per-call, `CREATE TABLE IF NOT EXISTS` pattern as
+  `UserRepository`, sharing its exact database via `UserRepository.getJdbcUrl()`)
+  now records every finished game's result and both sides' full move logs
+  the moment `GameSession.applyRatingChangeIfGameJustEnded` scores it -
+  right next to the existing ELO update, guarded by the same
+  `ratingApplied` flag so it only ever fires once per game.
+- **Load-aware shard allocation** - `GameAllocatorService.assignShard()`
+  now asks every configured shard's own `"shard.<id>.load"` (answered by
+  `GameServerShardController`/`GameServerShardService.activeGameCount()`,
+  backed by `Lobby.activeGameCount()`) how many in-progress games it's
+  hosting, and picks the least-loaded one. A shard that doesn't answer in
+  time is simply excluded from that round, not treated as an error; if
+  none respond at all, `ShardPicker`'s static round-robin (kept, unchanged)
+  is still there as a fallback so a room can always be assigned.

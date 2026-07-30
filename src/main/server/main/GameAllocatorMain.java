@@ -3,6 +3,9 @@ package server.main;
 import java.util.Arrays;
 import java.util.List;
 
+import io.nats.client.Connection;
+import io.nats.client.Nats;
+
 import logging.ActivityLog;
 import server.ShardPicker;
 import server.controller.GameAllocatorController;
@@ -14,6 +17,7 @@ public class GameAllocatorMain {
 
     public static void main(String[] args) {
         String natsUrl = System.getenv("KFC_NATS_URL");
+        if (natsUrl == null) throw new IllegalArgumentException("KFC_NATS_URL is required - server.GameAllocatorMain only runs in the distributed topology");
         String logPath = System.getenv().getOrDefault("KFC_LOG_PATH", DEFAULT_LOG_PATH);
         String shardIdsEnv = System.getenv("KFC_SHARD_IDS");
         if (shardIdsEnv == null || shardIdsEnv.isBlank()) {
@@ -21,15 +25,23 @@ public class GameAllocatorMain {
         }
         List<String> shardIds = Arrays.stream(shardIdsEnv.split(",")).map(String::trim).toList();
 
-        GameAllocatorService service = new GameAllocatorService(new ShardPicker(shardIds), new ActivityLog(logPath));
-        GameAllocatorController controller = new GameAllocatorController(natsUrl, service);
+        Connection natsConnection;
+        try {
+            natsConnection = Nats.connect(natsUrl);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not connect to NATS at " + natsUrl, e);
+        }
+
+        GameAllocatorService service = new GameAllocatorService(natsConnection, shardIds, new ShardPicker(shardIds), new ActivityLog(logPath));
+        GameAllocatorController controller = new GameAllocatorController(natsConnection, service);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            controller.stop();
             try {
-                controller.stop();
+                natsConnection.close();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }));
-        System.out.println("Kung Fu Chess Game Allocator ready, round-robin over " + shardIds);
+        System.out.println("Kung Fu Chess Game Allocator ready, load-aware over " + shardIds);
     }
 }

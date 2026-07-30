@@ -31,10 +31,13 @@ public class FakeWebSocket implements WebSocket, OutboundConnection {
     public final List<String> sentMessages = new ArrayList<>();
     private boolean open = true;
     private Object attachment;
+    private final String id = java.util.UUID.randomUUID().toString();
 
     public void setOpen(boolean open) {
         this.open = open;
     }
+
+    @Override public String id() { return id; }
 
     @Override public void close(int code, String message) { open = false; }
     @Override public void close(int code) { open = false; }

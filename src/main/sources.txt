@@ -42,9 +42,12 @@ ruleengine/RuleEngine.java
 server/GameAllocatorClient.java
 server/GameSession.java
 server/GatewayCommandEnvelope.java
+server/InMemoryMatchmakingQueueStore.java
 server/Lobby.java
 server/MatchQueue.java
+server/MatchmakingQueueStore.java
 server/Protocol.java
+server/RedisMatchmakingQueueStore.java
 server/Seat.java
 server/SeatPairEnvelope.java
 server/ShardPicker.java
@@ -80,6 +83,7 @@ server/service/MatchmakerService.java
 server/auth/AuthCommandParser.java
 server/auth/AuthService.java
 server/auth/EloCalculator.java
+server/auth/GameResultRepository.java
 server/auth/InMemorySessionTokenStore.java
 server/auth/PasswordHasher.java
 server/auth/RatingService.java

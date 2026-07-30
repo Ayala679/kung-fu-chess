@@ -29,13 +29,31 @@ import server.connection.RemoteOutboundConnection;
  * Server_Design.md).
  */
 public class MatchmakerService {
+    private static final long DEFAULT_TIMEOUT_MILLIS = 60_000L;
+
     private final Connection natsConnection;
     private final MatchQueue matchQueue;
     private final Map<String, RemoteOutboundConnection> connections = new ConcurrentHashMap<>();
 
     public MatchmakerService(Connection natsConnection, ActivityLog activityLog) {
+        this(natsConnection, activityLog, null);
+    }
+
+    /**
+     * Same as the 2-arg constructor, with {@code redisUrl} given explicitly:
+     * {@code null} keeps the queue in-memory (lost on restart - fine for
+     * local/offline runs and every unit test), a real URL backs it with
+     * {@link server.RedisMatchmakingQueueStore} instead (the Docker Compose
+     * deployment) so a waiting player survives this process restarting - see
+     * MatchQueue's own class Javadoc for exactly what that does and doesn't
+     * cover.
+     */
+    public MatchmakerService(Connection natsConnection, ActivityLog activityLog, String redisUrl) {
         this.natsConnection = natsConnection;
-        this.matchQueue = new MatchQueue(this::onMatchFound, activityLog);
+        server.MatchmakingQueueStore store = redisUrl == null
+                ? new server.InMemoryMatchmakingQueueStore()
+                : new server.RedisMatchmakingQueueStore(redisUrl);
+        this.matchQueue = new MatchQueue(this::onMatchFound, activityLog, DEFAULT_TIMEOUT_MILLIS, store);
     }
 
     private RemoteOutboundConnection connectionFor(String connectionId) {

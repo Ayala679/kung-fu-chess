@@ -82,6 +82,15 @@ public class Lobby {
         return sessionByConnection.get(connection);
     }
 
+    /** How many rooms this Lobby is currently hosting a genuinely in-progress game for (excludes finished ones) - the load signal GameAllocatorService queries via GameServerShardService/Controller's "shard.&lt;id&gt;.load" (see Server_Design.md's "Not done yet"). */
+    public int activeGameCount() {
+        int count = 0;
+        for (GameSession session : rooms.values()) {
+            if (!session.isGameOver()) count++;
+        }
+        return count;
+    }
+
     /** This Lobby's own shard identity (see the 7-arg constructor) - null outside the distributed, multi-shard topology. */
     public String getShardId() {
         return shardId;

@@ -30,6 +30,11 @@ public class RemoteOutboundConnection implements OutboundConnection {
     }
 
     @Override
+    public String id() {
+        return connectionId;
+    }
+
+    @Override
     public void send(String message) {
         if (!open) return;
         natsConnection.publish("conn." + connectionId + ".out", message.getBytes(StandardCharsets.UTF_8));

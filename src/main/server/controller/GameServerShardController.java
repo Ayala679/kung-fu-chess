@@ -50,6 +50,18 @@ public class GameServerShardController {
         dispatcher.subscribe("gateway.disconnect", msg -> handleDisconnect(new String(msg.getData(), StandardCharsets.UTF_8)));
         dispatcher.subscribe("shard." + shardId + ".seat_pair", msg -> handleSeatPair(new String(msg.getData(), StandardCharsets.UTF_8)));
         dispatcher.subscribe(RemoteRoomCreator.subjectFor(shardId), msg -> handleCreateRoom(natsConnection, msg));
+        dispatcher.subscribe(loadSubject(shardId), msg -> handleLoadQuery(natsConnection, msg));
+    }
+
+    /** The subject GameAllocatorService requests on to ask this shard's current load - see handleLoadQuery. */
+    public static String loadSubject(String shardId) {
+        return "shard." + shardId + ".load";
+    }
+
+    // Empty request, replies with this shard's own Lobby.activeGameCount() as plain text - the load-aware half of "Step 6a" (see Server_Design.md's "Not done yet").
+    private void handleLoadQuery(Connection natsConnection, Message msg) {
+        String count = String.valueOf(service.activeGameCount());
+        natsConnection.publish(msg.getReplyTo(), count.getBytes(StandardCharsets.UTF_8));
     }
 
     private void handleCommand(String encoded) {
@@ -101,5 +113,6 @@ public class GameServerShardController {
         dispatcher.unsubscribe("gateway.disconnect");
         dispatcher.unsubscribe("shard." + shardId + ".seat_pair");
         dispatcher.unsubscribe(RemoteRoomCreator.subjectFor(shardId));
+        dispatcher.unsubscribe(loadSubject(shardId));
     }
 }

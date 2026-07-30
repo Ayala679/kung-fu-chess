@@ -125,4 +125,9 @@ public class GameServerShardService {
     public String createRoom(String username) {
         return lobby.createRoom(username);
     }
+
+    /** Answers this shard's own "shard.&lt;id&gt;.load" query (see GameServerShardController) - how many in-progress games it's currently hosting, so GameAllocatorService can pick the least-loaded shard instead of pure round-robin. */
+    public int activeGameCount() {
+        return lobby.activeGameCount();
+    }
 }

@@ -19,6 +19,7 @@ import model.GameState;
 import model.Piece;
 import model.Position;
 import parsing.BoardMapper;
+import server.auth.GameResultRepository;
 import server.auth.RatingService;
 import server.auth.UserRepository;
 import server.connection.OutboundConnection;
@@ -121,6 +122,7 @@ public class GameSession {
     private final String snapshotTopic;
     private GameEngine engine;
     private final RatingService ratingService;
+    private final GameResultRepository gameResultRepository;
     private final ActivityLog activityLog;
     private final long disconnectGraceMillis;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -161,6 +163,7 @@ public class GameSession {
         this.roomCode = roomCode;
         this.snapshotTopic = "room." + roomCode + ".snapshot";
         this.ratingService = new RatingService(userRepository);
+        this.gameResultRepository = new GameResultRepository(userRepository.getJdbcUrl());
         this.activityLog = activityLog;
         this.disconnectGraceMillis = disconnectGraceMillis;
         this.engine = newStandardGameEngine();
@@ -684,6 +687,12 @@ public class GameSession {
         RatingService.Outcome outcome = ratingService.applyGameEnd(winnerName, winnerRating, loserName, loserRating);
         activityLog.log("room=" + roomCode + " GAME_OVER " + winnerName + " (" + winnerRating + " -> " + outcome.newWinnerRating
                 + ") beat " + loserName + " (" + loserRating + " -> " + outcome.newLoserRating + ")");
+
+        int whiteRatingAfter = whiteWon ? outcome.newWinnerRating : outcome.newLoserRating;
+        int blackRatingAfter = whiteWon ? outcome.newLoserRating : outcome.newWinnerRating;
+        gameResultRepository.recordGame(roomCode, whiteUsername, blackUsername, winnerName,
+                whiteRating, whiteRatingAfter, blackRating, blackRatingAfter,
+                snapshot.whiteMoves(), snapshot.blackMoves());
     }
 
     private void send(OutboundConnection connection, String message) {

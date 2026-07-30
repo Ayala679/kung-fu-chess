@@ -134,12 +134,20 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       KFC_NATS_URL: "nats://nats:4222"
+      # Backs the quick-match queue with Redis (server.RedisMatchmakingQueueStore)
+      # so a waiting player survives this container restarting - see
+      # Server_Design.md's "Not done yet"/MatchQueue's own class Javadoc for
+      # what this does and doesn't cover (still a single active Matchmaker
+      # instance, not coordinated across several).
+      KFC_REDIS_URL: "redis://redis:6379"
       KFC_LOG_PATH: "logs/matchmaker.log"
-    # No published ports, no Postgres/Redis access - MatchQueue is pure
-    # in-memory ELO pairing logic (see server.service.MatchmakerService's
-    # Javadoc and Server_Design.md's "Step 5").
+    # No published ports - MatchQueue is ELO pairing logic reached only over
+    # NATS (see server.service.MatchmakerService's Javadoc and
+    # Server_Design.md's "Step 5").
     volumes:
       - ./logs:/app/logs
 

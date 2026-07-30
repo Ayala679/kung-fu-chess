@@ -56,6 +56,11 @@ public class UserRepository {
         return DriverManager.getConnection(jdbcUrl);
     }
 
+    /** The resolved JDBC URL this repository connects with - lets {@link GameResultRepository} share the exact same database without re-deriving the sqlite-path-vs-jdbc-url logic in the constructor above. */
+    public String getJdbcUrl() {
+        return jdbcUrl;
+    }
+
     /** Result of a register/authenticate attempt: either a rating, or a failure reason. */
     public static final class AuthResult {
         private final boolean success;

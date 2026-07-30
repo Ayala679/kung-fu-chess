@@ -13,4 +13,7 @@ public interface OutboundConnection {
     void send(String message);
 
     boolean isOpen();
+
+    /** A stable identity for this connection, unique within its process - see {@link server.MatchmakingQueueStore} for the one caller that needs it (a Redis-backed queue can only persist this id, never the live connection itself). */
+    String id();
 }
