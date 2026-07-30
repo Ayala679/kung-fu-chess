@@ -21,7 +21,14 @@ import io.nats.client.Subscription;
 public class NatsBus implements Bus {
     private final Connection connection;
     private final Dispatcher dispatcher;
-    private final Map<Consumer<String>, Subscription> subscriptions = new ConcurrentHashMap<>();
+    // Keyed by topic first, then by handler - not just by handler alone: the same
+    // handler instance subscribed to two different topics used to collide (the
+    // second subscribe() would silently overwrite the first topic's entry in a
+    // flat handler-keyed map), so unsubscribing from one topic could tear down the
+    // wrong subscription and leak the other one. Nested per-topic maps make each
+    // (topic, handler) pair its own independent entry, matching InMemoryBus's own
+    // per-topic-list semantics.
+    private final Map<String, Map<Consumer<String>, Subscription>> subscriptions = new ConcurrentHashMap<>();
 
     public NatsBus(String url) throws IOException, InterruptedException {
         this.connection = Nats.connect(url);
@@ -31,13 +38,15 @@ public class NatsBus implements Bus {
     @Override
     public Consumer<String> subscribe(String topic, Consumer<String> handler) {
         Subscription subscription = dispatcher.subscribe(topic, msg -> handler.accept(new String(msg.getData(), StandardCharsets.UTF_8)));
-        subscriptions.put(handler, subscription);
+        subscriptions.computeIfAbsent(topic, t -> new ConcurrentHashMap<>()).put(handler, subscription);
         return handler;
     }
 
     @Override
     public void unsubscribe(String topic, Consumer<String> handler) {
-        Subscription subscription = subscriptions.remove(handler);
+        Map<Consumer<String>, Subscription> byHandler = subscriptions.get(topic);
+        if (byHandler == null) return;
+        Subscription subscription = byHandler.remove(handler);
         if (subscription != null) dispatcher.unsubscribe(subscription);
     }
 

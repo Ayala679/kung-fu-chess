@@ -58,6 +58,17 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
     private volatile GameSnapshot latestSnapshot;
     private volatile LobbyListener lobbyListener;
     private volatile ActivityLog activityLog;
+    // Guards against a STATE message that's still in flight from a just-left game
+    // (the old GameSession's ticker keeps broadcasting until the server actually
+    // processes the "play"/"join_room" that leaves it - see server.Lobby.leaveFinishedSessionIfAny)
+    // being mistaken for the new game's own first snapshot: the wire protocol
+    // carries no room/session id on a STATE frame, so a stray one can't be told
+    // apart from a real one by content alone. The server always sends WELCOME
+    // before that room's own first STATE (see server.GameSession.greet), so only
+    // counting STATE once a fresh WELCOME has been seen since the last reset
+    // closes the overwhelmingly common case of this race (a stray tick landing
+    // while still choosing the next game); see resetForNewGame().
+    private volatile boolean seatReadyForSnapshots = false;
     /** Epoch millis when the opponent will be auto-abandoned, or 0 if they aren't currently disconnected. */
     private volatile long opponentAbandonDeadline;
 
@@ -180,6 +191,7 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         roomCode = null;
         latestSnapshot = null;
         opponentAbandonDeadline = 0;
+        seatReadyForSnapshots = false;
         firstSnapshot = new CountDownLatch(1);
     }
 
@@ -243,6 +255,7 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
             if (lobbyListener != null) lobbyListener.onWaiting();
         } else if (message.startsWith(Protocol.WELCOME + "|role=")) {
             assignedSeat = Seat.valueOf(message.substring((Protocol.WELCOME + "|role=").length()).trim());
+            seatReadyForSnapshots = true;
             activityLog.log("seated as " + assignedSeat);
             if (lobbyListener != null) lobbyListener.onSeated(assignedSeat);
         } else if (message.startsWith(Protocol.COMMAND_RESULT + "|")) {
@@ -259,10 +272,12 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
             firstSnapshot.countDown();
             if (lobbyListener != null) lobbyListener.onLobbyError(serverError);
         } else if (message.startsWith(Protocol.STATE)) {
-            String block = message.substring(Protocol.STATE.length());
-            if (block.startsWith("\n")) block = block.substring(1);
-            latestSnapshot = SnapshotCodec.decode(block);
-            firstSnapshot.countDown();
+            if (seatReadyForSnapshots) {
+                String block = message.substring(Protocol.STATE.length());
+                if (block.startsWith("\n")) block = block.substring(1);
+                latestSnapshot = SnapshotCodec.decode(block);
+                firstSnapshot.countDown();
+            }
         } else if (message.startsWith(Protocol.OPPONENT_DISCONNECTED + "|")) {
             long graceSeconds = Long.parseLong(message.substring((Protocol.OPPONENT_DISCONNECTED + "|").length()).trim());
             opponentAbandonDeadline = System.currentTimeMillis() + graceSeconds * 1000;

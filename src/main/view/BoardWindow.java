@@ -6,6 +6,8 @@ import java.awt.Graphics;
 import java.awt.Rectangle;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
 import javax.swing.JButton;
 import javax.swing.JFrame;
@@ -34,6 +36,7 @@ public class BoardWindow {
     private final Runnable onNewGame;
     private final int boardWidthPx;
     private final int boardHeightPx;
+    private final Timer tickTimer;
     private volatile BufferedImage currentFrame;
     private JFrame windowFrame;
 
@@ -112,14 +115,25 @@ public class BoardWindow {
         newGameButton.addActionListener(e -> {
             if (onNewGame != null) {
                 windowFrame.dispose();
-                onNewGame.run();
+                // onNewGame ultimately blocks for real (LobbyDialog's modal wait,
+                // NetworkGameClient.awaitFirstSnapshot's CountDownLatch) - exactly
+                // like the very first game's own equivalent call chain, which runs
+                // on the JVM's main thread, never the EDT. Running it directly here
+                // (inside this ActionListener, which fires ON the EDT) would freeze
+                // the entire UI - no repaints, no window responsiveness - for as
+                // long as matchmaking/room-joining takes, instead of just this one
+                // window closing. A fresh background thread keeps it off the EDT.
+                Thread newGameThread = new Thread(onNewGame, "new-game-chooser");
+                newGameThread.setDaemon(true);
+                newGameThread.start();
             }
         });
 
-        new Timer(TICK_MS, e -> {
+        tickTimer = new Timer(TICK_MS, e -> {
             eventEngine.waitFor(TICK_MS);
             refresh();
-        }).start();
+        });
+        tickTimer.start();
     }
 
     private void refresh() {
@@ -160,6 +174,16 @@ public class BoardWindow {
     public void show(String subtitle) {
         windowFrame = new JFrame(subtitle == null || subtitle.isEmpty() ? "Kung Fu Chess" : "Kung Fu Chess - " + subtitle);
         windowFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        // dispose() (via the "New Game" button, above) fires windowClosed just like
+        // any other closure would - without this, tickTimer would keep firing every
+        // TICK_MS forever on this now-invisible, disposed panel, leaking one live
+        // Swing Timer per game ever played through "New Game".
+        windowFrame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosed(WindowEvent e) {
+                tickTimer.stop();
+            }
+        });
         if (onNewGame != null) {
             JPanel root = new JPanel(new BorderLayout());
             root.add(panel, BorderLayout.CENTER);
