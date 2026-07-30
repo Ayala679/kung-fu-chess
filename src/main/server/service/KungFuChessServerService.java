@@ -99,6 +99,11 @@ public class KungFuChessServerService {
     // the same underlying issue), each computed from its own already-stale
     // in-memory rating, silently losing whichever update lands first.
     private final Map<String, WebSocket> activeConnectionByUsername = new ConcurrentHashMap<>();
+    // The token this connection attached with - remembered so "logout" (Protocol.LOGOUT)
+    // knows which token to revoke without the client having to resend it. Populated in
+    // handleAttach; always handled locally regardless of topology, matching attach itself
+    // (SessionTokenStore is directly reachable in both - see this class's own Javadoc).
+    private final Map<WebSocket, String> tokensByConnection = new ConcurrentHashMap<>();
 
     // Embedded topology only (all null in distributed mode).
     private final Bus bus;
@@ -212,6 +217,11 @@ public class KungFuChessServerService {
     private void doHandleMessage(WebSocket conn, String message) {
         if (!usernames.containsKey(conn)) {
             handleAttach(conn, message);
+            return;
+        }
+
+        if (message.trim().equals(Protocol.LOGOUT)) {
+            handleLogout(conn);
             return;
         }
 
@@ -360,6 +370,21 @@ public class KungFuChessServerService {
                         && "1".equals(new String(reply.getData(), StandardCharsets.UTF_8)));
     }
 
+    /**
+     * "logout": revokes this connection's session token (the polite release
+     * path SessionTokenStore only had a TTL for before - see Protocol.LOGOUT)
+     * and closes the connection. Closing it triggers the exact same cleanup a
+     * real disconnect already goes through (handleClose, below) - forfeit/
+     * spectator-removal, matchmaking-queue removal, "gateway.disconnect" in
+     * the distributed topology - so this doesn't duplicate any of that.
+     */
+    private void handleLogout(WebSocket conn) {
+        String token = tokensByConnection.remove(conn);
+        if (token != null) sessionTokenStore.revoke(token);
+        activityLog.log("connection " + conn.getRemoteSocketAddress() + ": logged out");
+        conn.close();
+    }
+
     // Parses "attach <token>" (token minted by the REST login/register endpoints, see HttpApiServer/ApiGateway), replies AUTH_OK/ERROR. Always handled locally (SessionTokenStore is directly reachable in both topologies) - only what happens on success (a reconnect attempt) differs by topology.
     private void handleAttach(WebSocket conn, String message) {
         String[] parts = message.trim().split("\\s+", 2);
@@ -385,6 +410,7 @@ public class KungFuChessServerService {
         }
         usernames.put(conn, username);
         ratings.put(conn, principal.get().rating());
+        tokensByConnection.put(conn, parts[1].trim());
         conn.send(Protocol.AUTH_OK + "|" + principal.get().rating());
 
         // If this username was seated in a game it got disconnected from,
@@ -434,6 +460,10 @@ public class KungFuChessServerService {
         String username = usernames.remove(conn);
         if (username != null) activeConnectionByUsername.remove(username, conn);
         ratings.remove(conn);
+        // Deliberately NOT revoked here - an ordinary disconnect (network drop, tab
+        // closed without logging out) must leave the token valid so the same session
+        // can reconnect; only an explicit "logout" (handleLogout) revokes it early.
+        tokensByConnection.remove(conn);
 
         if (distributed) {
             shardOf.remove(conn);

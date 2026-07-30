@@ -4,6 +4,9 @@ import java.security.SecureRandom;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import bus.Bus;
 import logging.ActivityLog;
@@ -26,18 +29,40 @@ public class Lobby {
     private static final String ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int ROOM_CODE_LENGTH = 6;
     private static final long DEFAULT_DISCONNECT_GRACE_MILLIS = 20_000L;
+    // The reaper's own grace period and scan interval - see startReaper()'s Javadoc
+    // for why this "unattended" path exists alongside leaveFinishedSessionIfAny's
+    // "polite" one. 10 minutes is deliberately much longer than
+    // DEFAULT_DISCONNECT_GRACE_MILLIS (a room can sit finished-and-empty, eligible
+    // to be reconnected into for a delayed rematch, for a while before it's
+    // actually reclaimed); the 1-minute scan interval doesn't need to be precise,
+    // just periodic.
+    private static final long DEFAULT_REAP_GRACE_MILLIS = 10 * 60 * 1000L;
+    private static final long DEFAULT_REAP_SCAN_INTERVAL_MILLIS = 60_000L;
 
     private final Bus bus;
     private final UserRepository userRepository;
     private final ActivityLog activityLog;
     private final ReconnectRegistry reconnectRegistry;
     private final long disconnectGraceMillis;
+    private final long reapGraceMillis;
     private final String shardId;
     private final RoomDirectory roomDirectory;
     private final SecureRandom random = new SecureRandom();
 
     private final Map<String, GameSession> rooms = new ConcurrentHashMap<>();
     private final Map<OutboundConnection, GameSession> sessionByConnection = new ConcurrentHashMap<>();
+    // Tracks, per room code, the wall-clock instant reapAbandonedRooms() first
+    // observed that room as GameSession.isRetirable() - reset (removed) the moment
+    // a scan finds it no longer retirable (e.g. someone reconnected). Deliberately
+    // separate bookkeeping from GameSession itself: retirability can flicker
+    // (reconnect, then disconnect again), and only the reaper's own periodic
+    // observations need to know how long it's been continuously true.
+    private final Map<String, Long> retirableSinceMillis = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService reaperScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "lobby-room-reaper");
+        t.setDaemon(true);
+        return t;
+    });
 
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry) {
         this(bus, userRepository, activityLog, reconnectRegistry, DEFAULT_DISCONNECT_GRACE_MILLIS);
@@ -69,6 +94,19 @@ public class Lobby {
      */
     public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
                  long disconnectGraceMillis, String shardId, RoomDirectory roomDirectory) {
+        this(bus, userRepository, activityLog, reconnectRegistry, disconnectGraceMillis, shardId, roomDirectory,
+                DEFAULT_REAP_GRACE_MILLIS, DEFAULT_REAP_SCAN_INTERVAL_MILLIS);
+    }
+
+    /**
+     * Same as the 7-arg constructor, with the reaper's own grace period and
+     * scan interval (see {@link #startReaper}) given explicitly instead of
+     * the production defaults (10 minutes / 1 minute) - so tests can exercise
+     * {@link #reapAbandonedRooms()} with short, real (wall-clock) delays.
+     */
+    public Lobby(Bus bus, UserRepository userRepository, ActivityLog activityLog, ReconnectRegistry reconnectRegistry,
+                 long disconnectGraceMillis, String shardId, RoomDirectory roomDirectory,
+                 long reapGraceMillis, long reapScanIntervalMillis) {
         this.bus = bus;
         this.userRepository = userRepository;
         this.activityLog = activityLog;
@@ -76,6 +114,8 @@ public class Lobby {
         this.disconnectGraceMillis = disconnectGraceMillis;
         this.shardId = shardId;
         this.roomDirectory = roomDirectory;
+        this.reapGraceMillis = reapGraceMillis;
+        startReaper(reapScanIntervalMillis);
     }
 
     public GameSession sessionOf(OutboundConnection connection) {
@@ -242,7 +282,50 @@ public class Lobby {
         if (!session.isRetirable()) return;
         if (rooms.remove(session.getRoomCode(), session)) {
             session.shutdown();
+            retirableSinceMillis.remove(session.getRoomCode());
             activityLog.log("room=" + session.getRoomCode() + " retired (finished and empty)");
+        }
+    }
+
+    /**
+     * The "unattended" release path {@link #leaveFinishedSessionIfAny}'s
+     * "polite" one can never catch on its own: a genuine disconnect ({@link
+     * #handleDisconnect}) deliberately never retires a room by itself -
+     * reconnecting into a finished game must keep working - so a room both
+     * players simply walked away from (closed the tab, no one ever sends
+     * another "play"/"join_room" through this same connection) would
+     * otherwise sit in {@link #rooms} - ticker thread and all - for the rest
+     * of the process's lifetime. Nobody is going to send "I'm leaving" for a
+     * connection that's already gone, so something has to check on its own.
+     * This periodic scan is that something: scheduled at a fixed rate, it
+     * reclaims any room {@link GameSession#isRetirable()} has been
+     * continuously true for since at least {@link #reapGraceMillis} ago.
+     */
+    private void startReaper(long reapScanIntervalMillis) {
+        reaperScheduler.scheduleAtFixedRate(this::reapAbandonedRooms, reapScanIntervalMillis, reapScanIntervalMillis, TimeUnit.MILLISECONDS);
+    }
+
+    // Runs on the reaper's own scheduler thread every scan interval - see startReaper().
+    private void reapAbandonedRooms() {
+        try {
+            long now = System.currentTimeMillis();
+            for (Map.Entry<String, GameSession> entry : rooms.entrySet()) {
+                String code = entry.getKey();
+                GameSession session = entry.getValue();
+                if (!session.isRetirable()) {
+                    retirableSinceMillis.remove(code);
+                    continue;
+                }
+                long since = retirableSinceMillis.computeIfAbsent(code, c -> now);
+                if (now - since < reapGraceMillis) continue;
+                if (rooms.remove(code, session)) {
+                    session.shutdown();
+                    retirableSinceMillis.remove(code);
+                    activityLog.log("room=" + code + " reaped (abandoned - nobody reconnected or left within " + reapGraceMillis + "ms)");
+                }
+            }
+        } catch (RuntimeException e) {
+            activityLog.log("room reaper scan failed unexpectedly: " + e);
         }
     }
 

@@ -167,6 +167,12 @@ public class NetworkGameClient extends WebSocketClient implements GameClient {
         send(Protocol.JOIN_ROOM + " " + roomCode);
     }
 
+    /** Explicitly revokes this session's token server-side (see server.Protocol.LOGOUT) instead of just letting it expire, then closes the connection. */
+    public void logout() {
+        activityLog.log("logout");
+        send(Protocol.LOGOUT);
+    }
+
     /** Blocks until the first board snapshot arrives - call after {@link LobbyListener#onSeated}. */
     public void awaitFirstSnapshot(long timeoutSeconds) throws InterruptedException {
         if (!firstSnapshot.await(timeoutSeconds, TimeUnit.SECONDS)) {

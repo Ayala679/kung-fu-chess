@@ -22,4 +22,13 @@ public interface SessionTokenStore {
 
     /** Looks up a token without consuming it - absent if unknown or expired. */
     Optional<Principal> validate(String token);
+
+    /**
+     * The "polite" release path for a token (see server.Protocol.LOGOUT) -
+     * makes it invalid immediately instead of waiting for its TTL, the
+     * "unattended" path every token already had. Without this, a token could
+     * only ever expire, never be explicitly given up - safe to call even if
+     * token is already unknown or expired.
+     */
+    void revoke(String token);
 }

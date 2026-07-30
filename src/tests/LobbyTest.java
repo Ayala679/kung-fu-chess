@@ -13,6 +13,7 @@ import server.Lobby;
 import server.Seat;
 import server.auth.UserRepository;
 import server.reconnect.InMemoryReconnectRegistry;
+import server.room.InMemoryRoomDirectory;
 
 class LobbyTest {
 
@@ -26,6 +27,13 @@ class LobbyTest {
         UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
         ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
         return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(), disconnectGraceMillis);
+    }
+
+    private static Lobby newLobbyWithReaper(Path tempDir, long disconnectGraceMillis, long reapGraceMillis, long reapScanIntervalMillis) {
+        UserRepository userRepository = new UserRepository(tempDir.resolve("users.db").toString());
+        ActivityLog activityLog = new ActivityLog(tempDir.resolve("test.log").toString());
+        return new Lobby(new InMemoryBus(), userRepository, activityLog, new InMemoryReconnectRegistry(),
+                disconnectGraceMillis, null, new InMemoryRoomDirectory(), reapGraceMillis, reapScanIntervalMillis);
     }
 
     @Test void testSeatMatchedPairSeatsAndGreetsBothSides(@TempDir Path tempDir) {
@@ -202,5 +210,31 @@ class LobbyTest {
         FakeWebSocket alice = new FakeWebSocket();
 
         assertFalse(lobby.leaveFinishedSessionIfAny(alice));
+    }
+
+    // Regression test for the "unattended" release path a real disconnect deliberately
+    // never triggers on its own (see Lobby.handleDisconnect's own Javadoc: reconnecting
+    // into a finished game must keep working). If both players simply vanish - no
+    // reconnect, no explicit new game via leaveFinishedSessionIfAny - nothing would ever
+    // remove this room without the periodic reaper, leaking its GameSession (and, once
+    // both seats had filled, its still-running ticker thread) for the rest of the
+    // process's lifetime.
+    @Test void testAbandonedRoomIsReapedEvenWithoutAnyoneExplicitlyLeavingOrReconnecting(@TempDir Path tempDir) throws InterruptedException {
+        Lobby lobby = newLobbyWithReaper(tempDir, 50L, 150L, 30L);
+        FakeWebSocket alice = new FakeWebSocket();
+        FakeWebSocket bob = new FakeWebSocket();
+
+        String code = lobby.createRoom("alice");
+        lobby.joinRoom(code, alice, "alice", 1200);
+        lobby.joinRoom(code, bob, "bob", 1200);
+
+        lobby.handleDisconnect(alice);
+        Thread.sleep(200); // disconnect grace (50ms) elapses -> game abandoned, no winner
+        lobby.handleDisconnect(bob); // both gone now; nobody ever leaves or reconnects
+
+        Thread.sleep(400); // reap grace (150ms) plus a couple of scan intervals (30ms) elapse
+
+        FakeWebSocket aliceAgain = new FakeWebSocket();
+        assertFalse(lobby.tryReconnect(aliceAgain, "alice"), "the room should have been reaped - nothing left to reconnect to");
     }
 }

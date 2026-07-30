@@ -34,6 +34,16 @@ public final class Protocol {
     /** WS client -> server, first message on a new connection: {@code "attach <token>"} (token from the REST login/register call). */
     public static final String ATTACH = "attach";
 
+    /**
+     * Client -> server, sent once authenticated: explicitly revokes this
+     * connection's session token (see server.auth.SessionTokenStore.revoke)
+     * and closes the connection - the "polite" release path for a token,
+     * alongside its own TTL as the "unattended" one (see that interface's
+     * own Javadoc). No payload - the server already knows which token this
+     * connection attached with.
+     */
+    public static final String LOGOUT = "logout";
+
     /** Reply to REST login/register, and to the WS attach handshake: {@code "AUTH_OK|<rating>"} (REST also appends the token: {@code "AUTH_OK|<token>|<rating>"}). */
     public static final String AUTH_OK = "AUTH_OK";
 

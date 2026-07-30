@@ -46,6 +46,11 @@ public class InMemorySessionTokenStore implements SessionTokenStore {
         return Optional.of(entry.principal);
     }
 
+    @Override
+    public void revoke(String token) {
+        tokens.remove(token);
+    }
+
     private void prune() {
         long now = System.currentTimeMillis();
         tokens.values().removeIf(e -> e.expiresAt < now);

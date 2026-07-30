@@ -57,4 +57,11 @@ public class RedisSessionTokenStore implements SessionTokenStore {
             return Optional.of(new Principal(username, Integer.parseInt(rating)));
         }
     }
+
+    @Override
+    public void revoke(String token) {
+        try (Jedis jedis = new Jedis(redisUrl)) {
+            jedis.del(KEY_PREFIX + token);
+        }
+    }
 }
